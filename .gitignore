@@ -1,0 +1,17 @@
+# ESP-IDF build artifacts
+build/
+managed_components/
+dependencies.lock
+
+# sdkconfig (generated from sdkconfig.defaults on first build; keep out of VCS
+# unless you intentionally want to pin a specific config)
+sdkconfig
+sdkconfig.old
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,31 @@
+idf_component_register(
+    SRCS
+        "app_main.c"
+        "wifi_manager.c"
+        "storage.c"
+        "event_log.c"
+        "gpio_inputs.c"
+        "plug_manager.c"
+        "driver_http.c"
+        "driver_mqtt.c"
+        "driver_zigbee.c"
+        "web_server.c"
+    INCLUDE_DIRS "."
+    EMBED_FILES
+        "web/index.html"
+        "web/app.js"
+        "web/style.css"
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_http_server
+        esp_http_client
+        mqtt
+        json
+        driver
+        esp_timer
+        joltwallet__littlefs
+)
+
