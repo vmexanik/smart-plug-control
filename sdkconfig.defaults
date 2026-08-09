@@ -23,5 +23,26 @@ CONFIG_MBEDTLS_HARDWARE_SHA=y
 # --- Logging ---
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
+# --- FreeRTOS stack-overflow diagnostics ---
+# The default canary check (configCHECK_FOR_STACK_OVERFLOW=2) only verifies
+# the last few bytes of a task's stack on each context switch -- a single
+# deep call chain that overshoots the canary zone entirely (which is
+# exactly what happened: esp_http_client on ESP32-S3 blew well past an
+# 8192-byte stack that was fine on classic ESP32) goes undetected until
+# something unrelated touches the corrupted memory, surfacing as a
+# confusing Guru Meditation panic *inside the FreeRTOS scheduler itself*
+# instead of pointing at the actual offending task. This hardware
+# watchpoint catches the overflow the instant a write lands in the last 32
+# bytes of any task's stack, regardless of how far past that point the
+# write would otherwise have gone -- turns any next occurrence into a
+# precise panic instead of another one of these to puzzle over.
+CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
+
 # --- LWIP ---
-CONFIG_LWIP_MAX_SOCKETS=16
+# 16 wasn't enough once net_scan.c started opening several concurrent ping
+# sockets on top of the httpd server's own reserved sockets (~7) and AP/STA
+# overhead -- esp_ping_new_session() failed with "create socket failed: -1"
+# for most of the /24 sweep. See also CONCURRENCY in net_scan.c, which was
+# lowered at the same time so a single scan doesn't need this much headroom
+# on its own.
+CONFIG_LWIP_MAX_SOCKETS=32

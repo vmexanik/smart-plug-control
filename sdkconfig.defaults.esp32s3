@@ -1,0 +1,28 @@
+# ESP32-S3-specific overrides, merged on top of sdkconfig.defaults when the
+# target is set to esp32s3 (idf.py set-target esp32s3). Written for the
+# ESP32-S3-WROOM-1-N16R8 module specifically: 16MB (quad) flash + 8MB Octal
+# PSRAM. If a different N/R combination is used, adjust CONFIG_SPIRAM_MODE_*
+# and CONFIG_ESPTOOLPY_FLASHSIZE accordingly (N-number = flash size,
+# R2 = 2MB Quad PSRAM, R8 = 8MB Octal PSRAM, no "R" = no PSRAM at all).
+
+# --- Flash ---
+# N16 = 16MB. Still plain Quad SPI NOR flash (only the PSRAM is Octal on
+# this module) -- do not enable CONFIG_ESPTOOLPY_OCT_FLASH.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# --- PSRAM ---
+# R8 = 8MB Octal PSRAM. 80MHz is the stable/recommended speed; 120MHz Octal
+# is explicitly flagged experimental/temperature-sensitive by Espressif's
+# own Kconfig help text, not worth the risk for a device that runs 24/7.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+# Plain malloc() transparently spills into PSRAM above SPIRAM_MALLOC_ALWAYSINTERNAL
+# (16KB by default) -- no code changes needed to benefit from it. This is
+# what would have made this whole session's stack-overflow/socket-pool/heap-
+# fragmentation debugging round much shorter: net_scan's per-poll allocation
+# and esp_http_client's buffers would have had low-to-no memory pressure
+# with ~8MB of headroom instead of ESP32 classic's ~150-200KB fragmented
+# internal heap.
+CONFIG_SPIRAM_USE_MALLOC=y

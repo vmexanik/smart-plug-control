@@ -11,6 +11,9 @@ idf_component_register(
         "driver_zigbee.c"
         "web_server.c"
         "cJSON.c"
+        "time_sync.c"
+        "net_scan.c"
+        "fingerprint.c"
     INCLUDE_DIRS "."
     EMBED_FILES
         "web/index.html"
@@ -27,5 +30,8 @@ idf_component_register(
         esp_driver_gpio
         esp_timer
         joltwallet__littlefs
+        lwip
+        esp_hw_support
+        heap
 )
 

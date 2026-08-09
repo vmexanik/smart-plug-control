@@ -33,27 +33,39 @@ esp_err_t storage_init(void)
     return ESP_OK;
 }
 
+void storage_force_fixed_inputs(system_settings_t *settings)
+{
+    settings->inputs[0].id = INPUT_AC1;
+    strncpy(settings->inputs[0].label, "AC1", sizeof(settings->inputs[0].label) - 1);
+    settings->inputs[0].label[sizeof(settings->inputs[0].label) - 1] = '\0';
+    settings->inputs[0].gpio = CONFIG_INPUT_AC1_GPIO_DEFAULT;
+
+    settings->inputs[1].id = INPUT_DC1;
+    strncpy(settings->inputs[1].label, "DC1", sizeof(settings->inputs[1].label) - 1);
+    settings->inputs[1].label[sizeof(settings->inputs[1].label) - 1] = '\0';
+    settings->inputs[1].gpio = CONFIG_INPUT_DC1_GPIO_DEFAULT;
+
+    settings->inputs[2].id = INPUT_DC2;
+    strncpy(settings->inputs[2].label, "DC2", sizeof(settings->inputs[2].label) - 1);
+    settings->inputs[2].label[sizeof(settings->inputs[2].label) - 1] = '\0';
+    settings->inputs[2].gpio = CONFIG_INPUT_DC2_GPIO_DEFAULT;
+
+    /* Debounce/poll interval are physical-timing constants same as the GPIO
+     * pins above -- fixed by Kconfig, not web-editable (see Kconfig.projbuild). */
+    settings->debounce_ms = CONFIG_INPUT_DEBOUNCE_MS_DEFAULT;
+    settings->poll_interval_ms = CONFIG_INPUT_POLL_INTERVAL_MS_DEFAULT;
+}
+
 void storage_default_config(app_config_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
 
     cfg->plug_count = 0;
 
-    cfg->settings.inputs[0] = (input_cfg_t){
-        .id = INPUT_AC1, .label = "AC1",
-        .gpio = CONFIG_INPUT_AC1_GPIO_DEFAULT, .enabled = true,
-    };
-    cfg->settings.inputs[1] = (input_cfg_t){
-        .id = INPUT_DC1, .label = "DC1",
-        .gpio = CONFIG_INPUT_DC1_GPIO_DEFAULT, .enabled = false,
-    };
-    cfg->settings.inputs[2] = (input_cfg_t){
-        .id = INPUT_DC2, .label = "DC2",
-        .gpio = CONFIG_INPUT_DC2_GPIO_DEFAULT, .enabled = false,
-    };
-
-    cfg->settings.debounce_ms = 50;
-    cfg->settings.poll_interval_ms = 100;
+    storage_force_fixed_inputs(&cfg->settings); /* also sets debounce_ms/poll_interval_ms from Kconfig */
+    cfg->settings.inputs[0].enabled = true;
+    cfg->settings.inputs[1].enabled = false;
+    cfg->settings.inputs[2].enabled = false;
 
     cfg->settings.mqtt_uri[0] = '\0';
     strncpy(cfg->settings.mqtt_client_id, "smart-plug-hub", sizeof(cfg->settings.mqtt_client_id) - 1);
@@ -81,6 +93,8 @@ static void plug_to_json(const plug_t *p, cJSON *arr)
     cJSON_AddBoolToObject(http, "use_post", p->http.use_post);
     cJSON_AddStringToObject(http, "auth_user", p->http.auth_user);
     cJSON_AddStringToObject(http, "auth_pass", p->http.auth_pass);
+    cJSON_AddNumberToObject(http, "family", (int)p->http.family);
+    cJSON_AddNumberToObject(http, "kind", (int)p->http.kind);
     cJSON_AddItemToObject(o, "http", http);
 
     cJSON *mqtt = cJSON_CreateObject();
@@ -140,6 +154,8 @@ static void plug_from_json(const cJSON *o, plug_t *p)
         p->http.use_post = json_get_bool(http, "use_post", false);
         json_get_str(http, "auth_user", p->http.auth_user, sizeof(p->http.auth_user));
         json_get_str(http, "auth_pass", p->http.auth_pass, sizeof(p->http.auth_pass));
+        p->http.family = (plug_family_t)json_get_int(http, "family", PLUG_FAMILY_UNKNOWN);
+        p->http.kind = (plug_kind_t)json_get_int(http, "kind", PLUG_KIND_UNKNOWN);
     }
 
     const cJSON *mqtt = cJSON_GetObjectItemCaseSensitive(o, "mqtt");
@@ -197,14 +213,18 @@ static void settings_from_json(const cJSON *root, system_settings_t *s, const sy
             if (i >= INPUT_COUNT_PHYSICAL) break;
             s->inputs[i].id = (input_id_t)json_get_int(item, "id", s->inputs[i].id);
             json_get_str(item, "label", s->inputs[i].label, sizeof(s->inputs[i].label));
-            s->inputs[i].gpio = json_get_int(item, "gpio", s->inputs[i].gpio);
+            /* gpio is intentionally NOT read from JSON -- it is fixed by
+             * Kconfig (see storage_force_fixed_inputs() above), never
+             * editable via stored config or the web UI. */
             s->inputs[i].enabled = json_get_bool(item, "enabled", s->inputs[i].enabled);
             i++;
         }
     }
 
-    s->debounce_ms = (uint32_t)json_get_int(root, "debounce_ms", (int)s->debounce_ms);
-    s->poll_interval_ms = (uint32_t)json_get_int(root, "poll_interval_ms", (int)s->poll_interval_ms);
+    /* debounce_ms/poll_interval_ms are intentionally NOT read from JSON --
+     * fixed by Kconfig (see storage_force_fixed_inputs()), same as gpio
+     * above; still written out by settings_to_json() below purely so
+     * GET /api/settings can display the effective values. */
     json_get_str(root, "mqtt_uri", s->mqtt_uri, sizeof(s->mqtt_uri));
     json_get_str(root, "mqtt_user", s->mqtt_user, sizeof(s->mqtt_user));
     json_get_str(root, "mqtt_pass", s->mqtt_pass, sizeof(s->mqtt_pass));
@@ -215,7 +235,9 @@ static void settings_from_json(const cJSON *root, system_settings_t *s, const sy
 
 esp_err_t storage_load_config(app_config_t *cfg)
 {
-    app_config_t defaults;
+    /* app_config_t is ~26KB (MAX_PLUGS * sizeof(plug_t)) -- must not be a
+     * stack local, it would blow the caller's task stack. */
+    static app_config_t defaults;
     storage_default_config(&defaults);
 
     FILE *f = fopen(CONFIG_FILE_PATH, "r");
@@ -271,6 +293,10 @@ esp_err_t storage_load_config(app_config_t *cfg)
     } else {
         cfg->settings = defaults.settings;
     }
+    /* Belt-and-braces: guarantee GPIOs/debounce/poll interval match Kconfig
+     * even if config.json was written by an older firmware that persisted
+     * a different value. */
+    storage_force_fixed_inputs(&cfg->settings);
 
     cJSON_Delete(root);
     ESP_LOGI(TAG, "Loaded config: %d plug(s)", (int)cfg->plug_count);

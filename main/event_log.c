@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <time.h>
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -101,9 +102,11 @@ void event_log_append(const char *source, const char *plug_name,
 
     char line[256];
     size_t pos = 0;
-    int64_t t_us = esp_timer_get_time();
+    /* Real epoch seconds -- reads as 1970 until NTP syncs or the user sets
+     * the clock manually via the web UI (see time_sync.c / POST /api/time). */
+    time_t now = time(NULL);
 
-    pos += snprintf(line, sizeof(line), "{\"t\":%lld,\"src\":\"", (long long)(t_us / 1000000));
+    pos += snprintf(line, sizeof(line), "{\"t\":%lld,\"src\":\"", (long long)now);
     json_escape_append(line, sizeof(line), &pos, source ? source : "");
     pos += snprintf(line + pos, sizeof(line) - pos, "\",\"plug\":\"");
     json_escape_append(line, sizeof(line), &pos, plug_name ? plug_name : "");

@@ -35,6 +35,29 @@ typedef enum {
     DRIVER_ZIGBEE = 2, /* reserved / not yet implemented */
 } driver_type_t;
 
+/* Result of fingerprint.c's protocol cascade against a discovered HTTP host.
+ * "Gen2" covers Shelly Gen2, Gen3 and newer -- their RPC shape is identical,
+ * see fingerprint.c for details. Control still goes through the plain
+ * DRIVER_HTTP path (driver_http.c) -- this only decides which on_url/off_url
+ * template to prefill, not a separate runtime driver. */
+typedef enum {
+    PLUG_FAMILY_UNKNOWN     = 0,
+    PLUG_FAMILY_SHELLY_GEN1 = 1,
+    PLUG_FAMILY_SHELLY_GEN2 = 2,
+    PLUG_FAMILY_TASMOTA     = 3,
+    PLUG_FAMILY_ESPHOME     = 4,
+} plug_family_t;
+
+/* What kind of accessory this looks like, so a relay/light found during a
+ * scan doesn't get mistaken for a switchable plug. */
+typedef enum {
+    PLUG_KIND_UNKNOWN = 0,
+    PLUG_KIND_PLUG     = 1,
+    PLUG_KIND_RELAY    = 2,
+    PLUG_KIND_LIGHT    = 3,
+    PLUG_KIND_OTHER    = 4,
+} plug_kind_t;
+
 typedef struct {
     char on_url[URL_LEN];
     char off_url[URL_LEN];
@@ -42,7 +65,34 @@ typedef struct {
     bool use_post;            /* false = GET, true = POST */
     char auth_user[AUTH_LEN]; /* optional basic auth, empty = none */
     char auth_pass[AUTH_LEN];
+
+    /* Set (and persisted) when this plug was added by picking a
+     * fingerprint.c-recognized result from the network scan. UNKNOWN for
+     * anything entered by hand. When known, the web UI hides the on_url/
+     * off_url/use_post fields instead of offering them for editing (the
+     * whole point of fingerprinting was to not make the user hunt down
+     * their plug's API), and plug_manager_add() uses it to query the
+     * device's real on/off state via driver_http_get_status() instead of
+     * defaulting a freshly-added plug to "off". */
+    plug_family_t family;
+    plug_kind_t kind;
 } http_driver_cfg_t;
+
+/* Best-effort power-metering reading, queried periodically (see
+ * plug_manager.c's metrics_poll_task) via driver_http_get_metrics() for
+ * HTTP plugs with a recognized, metering-capable family. "valid" is false
+ * (with the numeric fields left at 0) whenever the device answered but
+ * doesn't actually report power data (e.g. a non-PM Shelly relay) -- that's
+ * different from a network/query failure, which just leaves the previous
+ * reading (and updated_us) untouched so the UI doesn't flicker to blank on
+ * one dropped poll. voltage_v/current_a may be 0 even when valid is true --
+ * Shelly Gen1 Plug/PlugS only ever reports power, no voltage/current. */
+typedef struct {
+    bool valid;
+    float power_w;
+    float voltage_v;
+    float current_a;
+} plug_metrics_t;
 
 typedef struct {
     char cmd_topic[TOPIC_LEN];
@@ -74,12 +124,16 @@ typedef struct {
     bool last_state;
     bool last_cmd_ok;
     int64_t last_change_us;
+    plug_metrics_t metrics;         /* last successful power-metering reading */
+    int64_t metrics_updated_us;     /* 0 = never successfully polled */
 } plug_t;
 
 typedef struct {
     input_id_t id;
     char label[8];    /* "AC1", "DC1", "DC2" */
-    int  gpio;
+    int  gpio;        /* fixed by Kconfig (see force_fixed_input_fields() in
+                        * plug_manager.c) -- never editable via config.json
+                        * or the web UI, only "enabled" is. */
     bool enabled;      /* system setting: is this input actively listened to */
 } input_cfg_t;
 
@@ -95,6 +149,11 @@ typedef struct {
 
     uint32_t log_max_file_size;
     uint32_t log_max_files;
+
+    /* NTP server is intentionally NOT here -- it's fixed at build time via
+     * CONFIG_NTP_SERVER_DEFAULT (Kconfig), not runtime/web-editable. See
+     * time_sync_init() call in app_main.c. Manual clock set (independent of
+     * NTP) is still available via POST /api/time -> time_sync_set_manual(). */
 } system_settings_t;
 
 typedef struct {

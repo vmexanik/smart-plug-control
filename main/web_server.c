@@ -1,6 +1,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -12,17 +13,24 @@
 #include "gpio_inputs.h"
 #include "event_log.h"
 #include "wifi_manager.h"
+#include "storage.h"
+#include "time_sync.h"
+#include "net_scan.h"
+#include "fingerprint.h"
 
 static const char *TAG = "web_server";
 
 #define REQ_BODY_MAX 2048
 
-extern const uint8_t web_index_html_start[] asm("_binary_web_index_html_start");
-extern const uint8_t web_index_html_end[]   asm("_binary_web_index_html_end");
-extern const uint8_t web_app_js_start[] asm("_binary_web_app_js_start");
-extern const uint8_t web_app_js_end[]   asm("_binary_web_app_js_end");
-extern const uint8_t web_style_css_start[] asm("_binary_web_style_css_start");
-extern const uint8_t web_style_css_end[]   asm("_binary_web_style_css_end");
+/* ESP-IDF's EMBED_FILES derives the symbol name from the file's basename
+ * only (directory component stripped), run through MAKE_C_IDENTIFIER --
+ * see tools/cmake/scripts/data_file_embed_asm.cmake. */
+extern const uint8_t web_index_html_start[] asm("_binary_index_html_start");
+extern const uint8_t web_index_html_end[]   asm("_binary_index_html_end");
+extern const uint8_t web_app_js_start[] asm("_binary_app_js_start");
+extern const uint8_t web_app_js_end[]   asm("_binary_app_js_end");
+extern const uint8_t web_style_css_start[] asm("_binary_style_css_start");
+extern const uint8_t web_style_css_end[]   asm("_binary_style_css_end");
 
 /* ---------------------------------------------------------------------- */
 /* helpers                                                                */
@@ -138,6 +146,30 @@ static driver_type_t driver_from_label(const char *s)
     return DRIVER_HTTP;
 }
 
+/* Inverse of fingerprint.c's plug_family_label()/plug_kind_label() -- the
+ * web UI round-trips whatever label it was given (from GET /api/plugs when
+ * editing, or from GET /api/scan when picking a scan result) back through
+ * POST/PUT unchanged, it's never something the user types by hand. */
+static plug_family_t family_from_label(const char *s)
+{
+    if (!s) return PLUG_FAMILY_UNKNOWN;
+    if (strcmp(s, "shelly_gen1") == 0) return PLUG_FAMILY_SHELLY_GEN1;
+    if (strcmp(s, "shelly_gen2") == 0) return PLUG_FAMILY_SHELLY_GEN2;
+    if (strcmp(s, "tasmota") == 0) return PLUG_FAMILY_TASMOTA;
+    if (strcmp(s, "esphome") == 0) return PLUG_FAMILY_ESPHOME;
+    return PLUG_FAMILY_UNKNOWN;
+}
+
+static plug_kind_t kind_from_label(const char *s)
+{
+    if (!s) return PLUG_KIND_UNKNOWN;
+    if (strcmp(s, "plug") == 0) return PLUG_KIND_PLUG;
+    if (strcmp(s, "relay") == 0) return PLUG_KIND_RELAY;
+    if (strcmp(s, "light") == 0) return PLUG_KIND_LIGHT;
+    if (strcmp(s, "other") == 0) return PLUG_KIND_OTHER;
+    return PLUG_KIND_UNKNOWN;
+}
+
 static cJSON *plug_to_json(const plug_t *p)
 {
     cJSON *o = cJSON_CreateObject();
@@ -155,6 +187,8 @@ static cJSON *plug_to_json(const plug_t *p)
     cJSON_AddBoolToObject(http, "use_post", p->http.use_post);
     cJSON_AddStringToObject(http, "auth_user", p->http.auth_user);
     cJSON_AddStringToObject(http, "auth_pass", p->http.auth_pass);
+    cJSON_AddStringToObject(http, "family", plug_family_label(p->http.family));
+    cJSON_AddStringToObject(http, "kind", plug_kind_label(p->http.kind));
     cJSON_AddItemToObject(o, "http", http);
 
     cJSON *mqtt = cJSON_CreateObject();
@@ -174,6 +208,14 @@ static cJSON *plug_to_json(const plug_t *p)
     cJSON_AddBoolToObject(o, "last_state", p->last_state);
     cJSON_AddBoolToObject(o, "last_cmd_ok", p->last_cmd_ok);
     cJSON_AddNumberToObject(o, "last_change_us", (double)p->last_change_us);
+
+    cJSON *metrics = cJSON_CreateObject();
+    cJSON_AddBoolToObject(metrics, "valid", p->metrics.valid);
+    cJSON_AddNumberToObject(metrics, "power_w", p->metrics.power_w);
+    cJSON_AddNumberToObject(metrics, "voltage_v", p->metrics.voltage_v);
+    cJSON_AddNumberToObject(metrics, "current_a", p->metrics.current_a);
+    cJSON_AddNumberToObject(metrics, "updated_us", (double)p->metrics_updated_us);
+    cJSON_AddItemToObject(o, "metrics", metrics);
 
     return o;
 }
@@ -201,6 +243,12 @@ static void plug_from_json(const cJSON *o, plug_t *p)
         p->http.use_post = jget_bool(http, "use_post", false);
         jget_str(http, "auth_user", p->http.auth_user, sizeof(p->http.auth_user));
         jget_str(http, "auth_pass", p->http.auth_pass, sizeof(p->http.auth_pass));
+
+        char family_str[16], kind_str[8];
+        jget_str(http, "family", family_str, sizeof(family_str));
+        jget_str(http, "kind", kind_str, sizeof(kind_str));
+        p->http.family = family_from_label(family_str);
+        p->http.kind = kind_from_label(kind_str);
     }
 
     const cJSON *mqtt = cJSON_GetObjectItemCaseSensitive(o, "mqtt");
@@ -266,12 +314,17 @@ static esp_err_t h_style_css(httpd_req_t *req)
 
 static esp_err_t h_plugs_get(httpd_req_t *req)
 {
-    plug_t plugs[MAX_PLUGS];
+    /* plug_t plugs[MAX_PLUGS] would be ~26KB -- too big for the httpd
+     * worker task's stack, so this is heap-allocated instead. */
+    plug_t *plugs = (plug_t *)malloc(sizeof(plug_t) * MAX_PLUGS);
+    if (!plugs) return send_error(req, 500, "out of memory");
+
     size_t n = plug_manager_get_all(plugs, MAX_PLUGS);
     cJSON *arr = cJSON_CreateArray();
     for (size_t i = 0; i < n; i++) {
         cJSON_AddItemToArray(arr, plug_to_json(&plugs[i]));
     }
+    free(plugs);
     return send_json(req, arr, 200);
 }
 
@@ -397,19 +450,25 @@ static void settings_from_json(const cJSON *root, system_settings_t *s)
         const cJSON *item = NULL;
         cJSON_ArrayForEach(item, inputs) {
             if (i >= INPUT_COUNT_PHYSICAL) break;
-            s->inputs[i].gpio = jget_int(item, "gpio", s->inputs[i].gpio);
+            /* gpio is intentionally ignored here -- it is fixed by Kconfig,
+             * never editable via the web UI. Only "enabled" applies. */
             s->inputs[i].enabled = jget_bool(item, "enabled", s->inputs[i].enabled);
             i++;
         }
     }
-    s->debounce_ms = (uint32_t)jget_int(root, "debounce_ms", (int)s->debounce_ms);
-    s->poll_interval_ms = (uint32_t)jget_int(root, "poll_interval_ms", (int)s->poll_interval_ms);
+    /* debounce_ms/poll_interval_ms are intentionally ignored here too --
+     * fixed by Kconfig, same reasoning as gpio above (still returned by
+     * settings_to_json() so the UI can display the effective values). */
     jget_str(root, "mqtt_uri", s->mqtt_uri, sizeof(s->mqtt_uri));
     jget_str(root, "mqtt_user", s->mqtt_user, sizeof(s->mqtt_user));
     jget_str(root, "mqtt_pass", s->mqtt_pass, sizeof(s->mqtt_pass));
     jget_str(root, "mqtt_client_id", s->mqtt_client_id, sizeof(s->mqtt_client_id));
     s->log_max_file_size = (uint32_t)jget_int(root, "log_max_file_size", (int)s->log_max_file_size);
     s->log_max_files = (uint32_t)jget_int(root, "log_max_files", (int)s->log_max_files);
+
+    /* Belt-and-braces: gpio/debounce/poll_interval can never be changed via
+     * this endpoint. */
+    storage_force_fixed_inputs(s);
 }
 
 static esp_err_t h_settings_get(httpd_req_t *req)
@@ -496,6 +555,7 @@ static esp_err_t h_status_get(httpd_req_t *req)
     wifi_manager_get_status(sta_ip, sizeof(sta_ip), ap_ip, sizeof(ap_ip), ssid, sizeof(ssid));
     cJSON *wifi = cJSON_CreateObject();
     cJSON_AddBoolToObject(wifi, "sta_connected", wifi_manager_is_connected());
+    cJSON_AddBoolToObject(wifi, "config_error", wifi_manager_sta_config_error());
     cJSON_AddStringToObject(wifi, "sta_ip", sta_ip);
     cJSON_AddStringToObject(wifi, "ap_ip", ap_ip);
     cJSON_AddStringToObject(wifi, "ssid", ssid);
@@ -508,11 +568,20 @@ static esp_err_t h_status_get(httpd_req_t *req)
 
 static esp_err_t h_wifi_get(httpd_req_t *req)
 {
-    char sta_ip[16], ap_ip[16], ssid[33];
+    char sta_ip[16], ap_ip[16], ssid[33], pass[65];
     wifi_manager_get_status(sta_ip, sizeof(sta_ip), ap_ip, sizeof(ap_ip), ssid, sizeof(ssid));
+    wifi_manager_get_sta_password(pass, sizeof(pass));
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "ssid", ssid);
+    /* Sent back so the settings form can be prefilled with the real value --
+     * this device's web UI has no auth of its own (see README), so this
+     * isn't a new exposure to whoever's already on the LAN and can reach
+     * it. Without this, clicking "Підключити" without retyping the
+     * password used to resubmit an empty one and break a working STA
+     * connection. */
+    cJSON_AddStringToObject(root, "password", pass);
     cJSON_AddBoolToObject(root, "connected", wifi_manager_is_connected());
+    cJSON_AddBoolToObject(root, "config_error", wifi_manager_sta_config_error());
     cJSON_AddStringToObject(root, "sta_ip", sta_ip);
     cJSON_AddStringToObject(root, "ap_ip", ap_ip);
     return send_json(req, root, 200);
@@ -542,6 +611,155 @@ static esp_err_t h_wifi_post(httpd_req_t *req)
     return send_json(req, resp, 200);
 }
 
+static esp_err_t h_wifi_scan_start(httpd_req_t *req)
+{
+    esp_err_t err = wifi_manager_scan_start();
+    if (err == ESP_ERR_INVALID_STATE) return send_error(req, 409, "scan already running");
+    if (err != ESP_OK) return send_error(req, 500, "failed to start scan");
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    return send_json(req, resp, 200);
+}
+
+static esp_err_t h_wifi_scan_status(httpd_req_t *req)
+{
+    bool running;
+    size_t count;
+    wifi_manager_get_scan_status(&running, &count);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "running", running);
+
+    cJSON *arr = cJSON_CreateArray();
+    wifi_scan_result_t r;
+    for (size_t i = 0; i < count; i++) {
+        if (!wifi_manager_get_scan_result(i, &r)) break;
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "ssid", r.ssid);
+        cJSON_AddNumberToObject(o, "rssi", r.rssi);
+        cJSON_AddBoolToObject(o, "secure", r.secure);
+        cJSON_AddItemToArray(arr, o);
+    }
+    cJSON_AddItemToObject(root, "results", arr);
+
+    return send_json(req, root, 200);
+}
+
+/* ---------------------------------------------------------------------- */
+/* /api/time                                                                */
+/* ---------------------------------------------------------------------- */
+
+static esp_err_t h_time_get(httpd_req_t *req)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "epoch", (double)time(NULL));
+    cJSON_AddBoolToObject(root, "synced", time_sync_is_synced());
+    cJSON_AddStringToObject(root, "source", time_sync_source());
+    return send_json(req, root, 200);
+}
+
+static esp_err_t h_time_post(httpd_req_t *req)
+{
+    char body[128];
+    if (recv_body(req, body, sizeof(body)) != ESP_OK) {
+        return send_error(req, 400, "body too large or missing");
+    }
+    cJSON *root = cJSON_Parse(body);
+    if (!root) return send_error(req, 400, "invalid json");
+
+    const cJSON *epoch_item = cJSON_GetObjectItemCaseSensitive(root, "epoch");
+    if (!cJSON_IsNumber(epoch_item)) {
+        cJSON_Delete(root);
+        return send_error(req, 400, "\"epoch\" (unix seconds) required");
+    }
+    int64_t epoch = (int64_t)epoch_item->valuedouble;
+    cJSON_Delete(root);
+
+    if (time_sync_set_manual(epoch) != ESP_OK) {
+        return send_error(req, 500, "failed to set system time");
+    }
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    cJSON_AddNumberToObject(resp, "epoch", (double)time(NULL));
+    return send_json(req, resp, 200);
+}
+
+/* ---------------------------------------------------------------------- */
+/* /api/scan -- local-network ping sweep (see net_scan.h for scope/limits)  */
+/* ---------------------------------------------------------------------- */
+
+static esp_err_t h_scan_start(httpd_req_t *req)
+{
+    esp_err_t err = net_scan_start();
+    if (err == ESP_ERR_NOT_FOUND) {
+        return send_error(req, 409, "STA not connected -- nothing to scan");
+    }
+    if (err == ESP_ERR_INVALID_STATE) {
+        return send_error(req, 409, "scan already running");
+    }
+    if (err != ESP_OK) {
+        return send_error(req, 500, "failed to start scan");
+    }
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    return send_json(req, resp, 200);
+}
+
+/* Requests the continuous scan (see net_scan_start()'s doc comment in
+ * net_scan.h) to stop. Not an error if nothing was running -- the "stop"/
+ * close button in the UI calls this unconditionally on close/pick, it
+ * doesn't track whether a scan happened to still be going. */
+static esp_err_t h_scan_stop(httpd_req_t *req)
+{
+    net_scan_stop();
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    return send_json(req, resp, 200);
+}
+
+static esp_err_t h_scan_status(httpd_req_t *req)
+{
+    /* Used to malloc() the whole ~20KB net_scan_status_t (results array
+     * included) on every poll -- that large, frequent single-shot
+     * allocation was failing intermittently from heap fragmentation, not
+     * just low total free heap. Fixed at the API level (see net_scan.h):
+     * fetch the small summary, then one result at a time, so no big buffer
+     * is ever needed here. */
+    net_scan_summary_t sum;
+    net_scan_get_summary(&sum);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "running", sum.running);
+    cJSON_AddBoolToObject(root, "have_subnet", sum.have_subnet);
+    cJSON_AddBoolToObject(root, "fingerprinting", sum.fingerprinting);
+    cJSON_AddNumberToObject(root, "pass", sum.pass);
+    cJSON_AddNumberToObject(root, "total", sum.total);
+    cJSON_AddNumberToObject(root, "scanned", sum.scanned);
+
+    cJSON *arr = cJSON_CreateArray();
+    net_scan_result_t r;
+    for (size_t i = 0; i < sum.result_count; i++) {
+        if (!net_scan_get_result(i, &r)) break;
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "ip", r.ip);
+        cJSON_AddStringToObject(o, "name", r.name);
+        cJSON_AddBoolToObject(o, "http", r.http_open);
+        cJSON_AddStringToObject(o, "family", plug_family_label(r.family));
+        cJSON_AddStringToObject(o, "kind", plug_kind_label(r.kind));
+        cJSON_AddStringToObject(o, "model", r.model);
+        cJSON_AddBoolToObject(o, "needs_auth", r.needs_auth);
+        cJSON_AddStringToObject(o, "on_url", r.on_url);
+        cJSON_AddStringToObject(o, "off_url", r.off_url);
+        cJSON_AddBoolToObject(o, "use_post", r.use_post);
+        cJSON_AddItemToArray(arr, o);
+    }
+    cJSON_AddItemToObject(root, "results", arr);
+
+    return send_json(req, root, 200);
+}
+
 /* ---------------------------------------------------------------------- */
 
 esp_err_t web_server_start(void)
@@ -549,8 +767,13 @@ esp_err_t web_server_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = CONFIG_WEB_HTTP_PORT;
     config.uri_match_fn = httpd_uri_match_wildcard;
-    config.max_uri_handlers = 20;
-    config.stack_size = 8192;
+    config.max_uri_handlers = 26;
+    /* The manual on/off test button (POST /api/plugs/{id}/action) runs
+     * driver_http_set() -- and therefore esp_http_client -- synchronously
+     * on this httpd worker task, same as plug_manager.c's own worker_task.
+     * See the comment there for why this needs real headroom on ESP32-S3,
+     * not just the 8192 that was enough on classic ESP32. */
+    config.stack_size = 12288;
 
     httpd_handle_t server = NULL;
     esp_err_t err = httpd_start(&server, &config);
@@ -576,6 +799,13 @@ esp_err_t web_server_start(void)
         { .uri = "/api/status",    .method = HTTP_GET,    .handler = h_status_get },
         { .uri = "/api/wifi",      .method = HTTP_GET,    .handler = h_wifi_get },
         { .uri = "/api/wifi",      .method = HTTP_POST,   .handler = h_wifi_post },
+        { .uri = "/api/wifi/scan", .method = HTTP_POST,   .handler = h_wifi_scan_start },
+        { .uri = "/api/wifi/scan", .method = HTTP_GET,    .handler = h_wifi_scan_status },
+        { .uri = "/api/time",      .method = HTTP_GET,    .handler = h_time_get },
+        { .uri = "/api/time",      .method = HTTP_POST,   .handler = h_time_post },
+        { .uri = "/api/scan",      .method = HTTP_POST,   .handler = h_scan_start },
+        { .uri = "/api/scan",      .method = HTTP_GET,    .handler = h_scan_status },
+        { .uri = "/api/scan",      .method = HTTP_DELETE, .handler = h_scan_stop },
     };
 
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {

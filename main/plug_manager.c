@@ -13,6 +13,7 @@
 #include "driver_http.h"
 #include "driver_mqtt.h"
 #include "driver_zigbee.h"
+#include "wifi_manager.h"
 
 static const char *TAG = "plug_manager";
 
@@ -110,6 +111,136 @@ static void worker_task(void *arg)
     }
 }
 
+/* Power-metering isn't time-critical (unlike on/off commands, which go
+ * through the queue+worker_task path above and should feel instant) -- a
+ * plain periodic poll loop is enough, and keeps it decoupled from the
+ * action queue. */
+#define METRICS_POLL_INTERVAL_MS 15000
+#define METRICS_POLL_TASK_STACK  12288  /* esp_http_client-calling task, see worker_task's comment */
+
+static void metrics_poll_task(void *arg)
+{
+    /* static, not a local array: MAX_PLUGS * sizeof(plug_t) is easily a few
+     * KB, and this project has already hit one hard-to-diagnose stack
+     * overflow from underestimating an esp_http_client-adjacent task's
+     * stack needs (see README) -- not repeating that mistake by putting a
+     * big buffer on top of it. */
+    static plug_t snapshot[MAX_PLUGS];
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(METRICS_POLL_INTERVAL_MS));
+
+        /* Snapshot the plugs worth polling under lock, then do all the
+         * (blocking, potentially slow) HTTP calls with no lock held --
+         * same discipline do_dispatch()/plug_manager_add() use for the
+         * on/off path. Only HTTP plugs with a fingerprint-recognized
+         * family can possibly answer a metrics query (see
+         * driver_http_get_metrics()). */
+        size_t n = 0;
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        for (size_t i = 0; i < s_cfg.plug_count; i++) {
+            plug_t *p = &s_cfg.plugs[i];
+            if (p->enabled && p->driver == DRIVER_HTTP && p->http.family != PLUG_FAMILY_UNKNOWN) {
+                snapshot[n++] = *p;
+            }
+        }
+        xSemaphoreGive(s_lock);
+
+        for (size_t i = 0; i < n; i++) {
+            plug_metrics_t m;
+            if (driver_http_get_metrics(&snapshot[i], &m) != ESP_OK) {
+                /* Network error / bad response -- leave the previous reading
+                 * (and its timestamp) as-is rather than blanking the UI over
+                 * one dropped poll. */
+                continue;
+            }
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            int idx = find_index_locked(snapshot[i].id);
+            if (idx >= 0) {
+                s_cfg.plugs[idx].metrics = m;
+                s_cfg.plugs[idx].metrics_updated_us = esp_timer_get_time();
+            }
+            xSemaphoreGive(s_lock);
+        }
+    }
+}
+
+/* Boot-time "what's actually on right now" check for plugs restored from
+ * config.json. plug_manager_add() already does this for a plug at the
+ * moment it's created (see below); this is the same idea applied once, at
+ * startup, to everything loaded from storage -- otherwise a saved plug
+ * always starts out reported as "off" until its next command or metrics
+ * poll, even if the physical relay was left on across a reboot. */
+#define INITIAL_STATUS_TASK_STACK   12288 /* esp_http_client-calling task, see worker_task's comment */
+#define INITIAL_STATUS_WAIT_STEP_MS 1000
+#define INITIAL_STATUS_WAIT_MAX_MS  (30 * 1000)
+
+static void initial_status_task(void *arg)
+{
+    (void)arg;
+
+    /* This task starts well before STA association+DHCP can plausibly be
+     * done (wifi_manager_init() only kicks off the connection attempt, it
+     * doesn't block on it), so wait for a real connection first -- up to a
+     * bounded timeout, and bailing out early if the STA config itself is
+     * bad (wrong password etc., see wifi_manager_sta_config_error()) since
+     * that's never going to resolve on its own. Skipping the check
+     * entirely in either case is fine: plugs just keep their storage
+     * default (last_state = false) same as before this feature existed. */
+    int waited_ms = 0;
+    while (!wifi_manager_is_connected() && waited_ms < INITIAL_STATUS_WAIT_MAX_MS) {
+        if (wifi_manager_sta_config_error()) {
+            ESP_LOGW(TAG, "initial status check: STA not configured/failed, skipping");
+            vTaskDelete(NULL);
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(INITIAL_STATUS_WAIT_STEP_MS));
+        waited_ms += INITIAL_STATUS_WAIT_STEP_MS;
+    }
+    if (!wifi_manager_is_connected()) {
+        ESP_LOGW(TAG, "initial status check: STA still not connected after %ds, skipping",
+                 INITIAL_STATUS_WAIT_MAX_MS / 1000);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    /* Same snapshot-under-lock / network-call-outside-lock / update-under-
+     * lock discipline as metrics_poll_task() and plug_manager_add(). */
+    static plug_t snapshot[MAX_PLUGS];
+    size_t n = 0;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    for (size_t i = 0; i < s_cfg.plug_count; i++) {
+        plug_t *p = &s_cfg.plugs[i];
+        if (p->driver == DRIVER_HTTP && p->http.family != PLUG_FAMILY_UNKNOWN) {
+            snapshot[n++] = *p;
+        }
+    }
+    xSemaphoreGive(s_lock);
+
+    ESP_LOGI(TAG, "initial status check: querying %u saved plug(s)", (unsigned)n);
+    size_t checked = 0;
+    for (size_t i = 0; i < n; i++) {
+        bool on = false;
+        if (driver_http_get_status(&snapshot[i], &on) != ESP_OK) {
+            ESP_LOGW(TAG, "initial status check: could not query \"%s\", leaving as-is", snapshot[i].name);
+            continue;
+        }
+        checked++;
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        int idx = find_index_locked(snapshot[i].id);
+        if (idx >= 0) {
+            s_cfg.plugs[idx].last_state = on;
+            s_cfg.plugs[idx].last_cmd_ok = true;
+            s_cfg.plugs[idx].last_change_us = esp_timer_get_time();
+        }
+        xSemaphoreGive(s_lock);
+        event_log_append(LOG_SRC_BOOT, snapshot[i].name, on ? "on" : "off", true, "initial status check");
+    }
+    ESP_LOGI(TAG, "initial status check: %u/%u plug(s) confirmed", (unsigned)checked, (unsigned)n);
+
+    vTaskDelete(NULL);
+}
+
 static void enqueue_action(uint32_t plug_id, bool on, const char *source)
 {
     plug_action_t act = { .plug_id = plug_id, .desired_on = on };
@@ -125,6 +256,7 @@ esp_err_t plug_manager_init(const app_config_t *initial_cfg)
     if (!s_lock) return ESP_ERR_NO_MEM;
 
     s_cfg = *initial_cfg;
+    storage_force_fixed_inputs(&s_cfg.settings);
 
     uint32_t max_id = 0;
     for (size_t i = 0; i < s_cfg.plug_count; i++) {
@@ -132,14 +264,42 @@ esp_err_t plug_manager_init(const app_config_t *initial_cfg)
         s_cfg.plugs[i].last_state = false;
         s_cfg.plugs[i].last_cmd_ok = true;
         s_cfg.plugs[i].last_change_us = 0;
+        memset(&s_cfg.plugs[i].metrics, 0, sizeof(s_cfg.plugs[i].metrics));
+        s_cfg.plugs[i].metrics_updated_us = 0;
     }
     s_next_id = max_id + 1;
 
     s_action_queue = xQueueCreate(32, sizeof(plug_action_t));
     if (!s_action_queue) return ESP_ERR_NO_MEM;
 
-    BaseType_t ok = xTaskCreate(worker_task, "plug_worker", 4096, NULL, 5, NULL);
+    /* esp_http_client (DNS resolution, TCP/TLS transport, header parsing)
+     * needs considerably more than 4KB of stack -- 4096 overflowed as soon
+     * as a plug with an HTTP driver actually got dispatched. 8192 was
+     * enough on classic ESP32 (Xtensa LX6) but produced a Guru Meditation
+     * LoadProhibited panic *inside the FreeRTOS scheduler itself* (poisoned
+     * 0xa5a5a5a5 registers -- the canary-based overflow check only
+     * verifies the last few bytes of the stack on each context switch, so
+     * a single deep call chain that overshoots it entirely goes
+     * undetected until something else touches the corrupted memory) the
+     * moment a real esp_http_client call ran on ESP32-S3 (LX7) -- deeper
+     * call chains there apparently use more stack. Bumped with real
+     * headroom instead of nudging it up by a few hundred bytes again. */
+    BaseType_t ok = xTaskCreate(worker_task, "plug_worker", 12288, NULL, 5, NULL);
     if (ok != pdPASS) return ESP_ERR_NO_MEM;
+
+    /* Lower priority than worker_task -- background metering polls should
+     * never delay an actual on/off command. */
+    BaseType_t okm = xTaskCreate(metrics_poll_task, "plug_metrics", METRICS_POLL_TASK_STACK, NULL, 3, NULL);
+    if (okm != pdPASS) return ESP_ERR_NO_MEM;
+
+    /* One-shot, not periodic -- deletes itself once done. Not treated as a
+     * fatal init failure if it can't be started: it's a nice-to-have, and
+     * plugs already have a well-defined (if occasionally stale) fallback
+     * of "assume off". */
+    BaseType_t oki = xTaskCreate(initial_status_task, "plug_init_status", INITIAL_STATUS_TASK_STACK, NULL, 3, NULL);
+    if (oki != pdPASS) {
+        ESP_LOGW(TAG, "could not start initial status check task, saved plugs keep default state");
+    }
 
     driver_mqtt_apply_settings(&s_cfg.settings);
 
@@ -208,15 +368,31 @@ esp_err_t plug_manager_get(uint32_t id, plug_t *out)
 
 esp_err_t plug_manager_add(plug_t *in_out)
 {
+    /* Query the device's real current on/off state before touching the
+     * lock -- this is a network call (up to a few seconds), and it must
+     * never run while s_lock is held, same discipline do_dispatch() uses
+     * for the normal on/off path. Only possible for HTTP plugs with a
+     * fingerprint-recognized family (Shelly/Tasmota); anything else keeps
+     * the previous "assume off, not a reported failure" default -- there's
+     * no reliable way to ask an unrecognized/manual endpoint for its state. */
+    bool initial_on = false;
+    bool got_status = false;
+    if (in_out->driver == DRIVER_HTTP && in_out->http.family != PLUG_FAMILY_UNKNOWN) {
+        got_status = (driver_http_get_status(in_out, &initial_on) == ESP_OK);
+        if (!got_status) {
+            ESP_LOGW(TAG, "could not query initial status for \"%s\", defaulting to off", in_out->name);
+        }
+    }
+
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (s_cfg.plug_count >= MAX_PLUGS) {
         xSemaphoreGive(s_lock);
         return ESP_ERR_NO_MEM;
     }
     in_out->id = s_next_id++;
-    in_out->last_state = false;
-    in_out->last_cmd_ok = true;
-    in_out->last_change_us = 0;
+    in_out->last_state = got_status ? initial_on : false;
+    in_out->last_cmd_ok = true; /* either genuinely confirmed, or "no info yet", not a failure */
+    in_out->last_change_us = esp_timer_get_time();
     s_cfg.plugs[s_cfg.plug_count] = *in_out;
     s_cfg.plug_count++;
     esp_err_t err = save_locked();
@@ -239,6 +415,8 @@ esp_err_t plug_manager_update(uint32_t id, const plug_t *in)
     updated.last_state = s_cfg.plugs[idx].last_state;
     updated.last_cmd_ok = s_cfg.plugs[idx].last_cmd_ok;
     updated.last_change_us = s_cfg.plugs[idx].last_change_us;
+    updated.metrics = s_cfg.plugs[idx].metrics;
+    updated.metrics_updated_us = s_cfg.plugs[idx].metrics_updated_us;
     s_cfg.plugs[idx] = updated;
     esp_err_t err = save_locked();
     xSemaphoreGive(s_lock);
@@ -295,14 +473,17 @@ esp_err_t plug_manager_get_settings(system_settings_t *out)
 
 esp_err_t plug_manager_update_settings(const system_settings_t *in)
 {
+    system_settings_t new_settings = *in;
+    storage_force_fixed_inputs(&new_settings); /* gpio is never web-editable */
+
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_cfg.settings = *in;
+    s_cfg.settings = new_settings;
     esp_err_t err = save_locked();
     xSemaphoreGive(s_lock);
 
-    gpio_inputs_update_settings(in);
-    event_log_update_limits(in->log_max_file_size, in->log_max_files);
-    driver_mqtt_apply_settings(in);
+    gpio_inputs_update_settings(&new_settings);
+    event_log_update_limits(new_settings.log_max_file_size, new_settings.log_max_files);
+    driver_mqtt_apply_settings(&new_settings);
 
     event_log_append(LOG_SRC_SYSTEM, "-", "settings_updated", true, NULL);
 

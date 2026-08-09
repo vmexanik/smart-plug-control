@@ -2,21 +2,48 @@ menu "Smart Plug Control"
 
     menu "Default trigger input GPIOs"
         comment "Runtime web UI can change enable/disable and invert; these are the physical pin defaults on first boot."
+        comment "Defaults below target ESP32-S3-WROOM-1-N16R8 (Octal PSRAM). If building for a classic ESP32-WROOM-32 instead, GPIO34/35/32 (input-only, no pull resistor) are the traditional choice there and remain valid -- just change these three back."
 
         config INPUT_AC1_GPIO_DEFAULT
             int "AC1 default GPIO"
-            default 34
-            range 0 39
+            default 4
+            range 0 48
+            help
+                On ESP32-S3-WROOM-1 with Octal PSRAM (the "R8" modules,
+                e.g. N16R8), GPIO26-37 are wired to flash/PSRAM and GPIO19/
+                20 are USB-JTAG, GPIO43/44 are the default console UART,
+                GPIO0/3/45/46 are strapping pins -- none of those are usable
+                here. GPIO4-18, 21, 38-42, 47, 48 are free. (On classic
+                ESP32-WROOM-32 the valid range is 0-39, input-only above 34.)
 
         config INPUT_DC1_GPIO_DEFAULT
             int "DC1 default GPIO"
-            default 35
-            range 0 39
+            default 5
+            range 0 48
 
         config INPUT_DC2_GPIO_DEFAULT
             int "DC2 default GPIO"
-            default 32
-            range 0 39
+            default 6
+            range 0 48
+
+        config INPUT_DEBOUNCE_MS_DEFAULT
+            int "Input debounce (ms)"
+            default 50
+            range 0 5000
+            help
+                Not editable from the web UI (same reasoning as the GPIO
+                pins above -- these are physical-wiring/timing constants,
+                not something to get wrong from a phone browser). Change
+                here and reflash if your switches/relays need a different
+                debounce window.
+
+        config INPUT_POLL_INTERVAL_MS_DEFAULT
+            int "Input poll interval (ms)"
+            default 100
+            range 10 5000
+            help
+                How often gpio_inputs.c re-reads the trigger input levels.
+                Not editable from the web UI, same as debounce above.
     endmenu
 
     config WEB_HTTP_PORT
@@ -30,5 +57,39 @@ menu "Smart Plug Control"
     config AP_FALLBACK_PASSWORD
         string "Fallback AP password (min 8 chars)"
         default "plugsetup"
+
+    config NTP_SERVER_DEFAULT
+        string "NTP server (empty = disable automatic time sync)"
+        default "pool.ntp.org"
+        help
+            Not editable from the web UI -- change here and reflash if you
+            need a different server (e.g. a LAN-local NTP server). The web
+            UI still allows setting the clock manually via POST /api/time,
+            which is independent of this setting.
+
+    menu "Network scan / device fingerprinting"
+        config FINGERPRINT_HTTP_TIMEOUT_MS
+            int "HTTP timeout per fingerprint request (ms)"
+            default 800
+            range 200 5000
+            help
+                Applies to each request in the Shelly/Tasmota/ESPHome
+                detection cascade (see fingerprint.c). Runs sequentially
+                against every host the scan found with TCP:80 open, so
+                keep this short -- a handful of unresponsive candidates at
+                a high timeout noticeably slows the scan down.
+
+        config FINGERPRINT_ENABLE_ESPHOME
+            bool "Attempt ESPHome detection"
+            default y
+            help
+                Adds a "GET /" heuristic (body contains "ESPHome") plus a
+                best-effort scan of the response HTML for a /switch/<id>/
+                entity to build a control URL. ESPHome's web_server
+                component must be enabled in the device's own YAML config
+                and must expose a switch entity for this to find anything
+                -- ESPHome's native API (port 6053, protobuf) is not
+                implemented, see README.
+    endmenu
 
 endmenu
