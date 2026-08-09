@@ -746,6 +746,7 @@ static esp_err_t h_scan_status(httpd_req_t *req)
         cJSON_AddStringToObject(o, "ip", r.ip);
         cJSON_AddStringToObject(o, "name", r.name);
         cJSON_AddBoolToObject(o, "http", r.http_open);
+        cJSON_AddBoolToObject(o, "via_arp", r.via_arp);
         cJSON_AddStringToObject(o, "family", plug_family_label(r.family));
         cJSON_AddStringToObject(o, "kind", plug_kind_label(r.kind));
         cJSON_AddStringToObject(o, "model", r.model);

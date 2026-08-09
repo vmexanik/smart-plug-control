@@ -9,6 +9,8 @@
 
 #include "lwip/ip_addr.h"
 #include "lwip/ip4_addr.h"
+#include "lwip/tcpip.h"
+#include "lwip/etharp.h"
 #include "ping/ping_sock.h"
 
 #include "freertos/FreeRTOS.h"
@@ -98,6 +100,7 @@ typedef struct {
 
 static SemaphoreHandle_t s_lock;
 static SemaphoreHandle_t s_batch_sem;
+static SemaphoreHandle_t s_arp_done_sem; /* see arp_dump_snapshot() */
 static net_scan_full_status_t s_status;
 
 typedef struct {
@@ -364,6 +367,91 @@ static bool reverse_dns_lookup(const char *ip_str, uint32_t dns_ip_h, char *out,
     return false;
 }
 
+/* --- ARP-cache fallback ----------------------------------------------------
+ *
+ * Ping and TCP:80 both require lwIP to ARP-resolve the target's MAC before
+ * it can send anything at all -- that resolution succeeding gets recorded
+ * in lwIP's own ARP table regardless of what happens next. Some hosts
+ * answer that ARP resolution just fine (their NIC/IP stack has to, or
+ * nothing works) and then silently drop the ICMP echo or refuse the TCP
+ * SYN outright -- a default Windows Firewall does exactly this, and so
+ * does a fair amount of IoT firmware. Ping-only scanning has always missed
+ * these; reading the ARP table catches them for free, no extra packets of
+ * our own.
+ *
+ * This reads lwIP's *cache*, it does not send raw ARP frames itself (that
+ * would need promiscuous-mode capture on the Wi-Fi driver, a much bigger
+ * and riskier change -- see net_scan.h's scope note).
+ *
+ * ESP-IDF's lwIP port runs with LWIP_TCPIP_CORE_LOCKING *off* by default
+ * (see sdkconfig / components/lwip/Kconfig) -- LOCK_TCPIP_CORE()/
+ * UNLOCK_TCPIP_CORE() are silent no-ops in that mode, not a real mutex, so
+ * calling etharp_get_entry() directly from this task would race against
+ * the tcpip thread mutating the same table. The correct, lock-free-required
+ * way to touch lwIP internals from any other task is tcpip_callback(): it
+ * marshals a function onto the tcpip thread itself and runs it there, so
+ * no locking is needed at all. We block (with a timeout, just in case) on
+ * a semaphore until that callback has run and copied its result out. */
+#define ARP_DUMP_MAX_ENTRIES  32 /* >= lwIP's ARP_TABLE_SIZE (10 by default on this target, not
+                                   * exposed via Kconfig -- harmless if the real table is smaller */
+#define ARP_CALLBACK_WAIT_MS  500
+
+/* Static, not a local/stack buffer: arp_dump_cb() runs asynchronously on
+ * the tcpip thread, some unbounded (if unlikely) amount of time after
+ * tcpip_callback() posts it. If arp_dump_snapshot() ever hit its timeout
+ * below and returned before the callback actually ran, a stack-local
+ * buffer would already be part of some other function's frame by the time
+ * the callback finally wrote into it -- silent stack corruption, in a
+ * project that has already been bitten hard by exactly that class of bug
+ * once (see plug_manager.c/README). A static buffer makes a late callback
+ * merely harmless (it just overwrites still-valid memory), not dangerous.
+ * Safe because this is only ever called serially from net_scan_task. */
+static uint32_t s_arp_ip_h[ARP_DUMP_MAX_ENTRIES];
+static size_t s_arp_count;
+
+/* Runs ON the tcpip thread (see the block comment above) -- must not block,
+ * must not call anything that isn't safe there. etharp_get_entry(i, ...)
+ * returns nonzero for a valid/stable entry at index i, 0 for an empty or
+ * still-pending slot; iterating the whole table is the only API lwIP
+ * exposes for "dump everything currently known", there's no single-shot
+ * "give me them all" call. */
+static void arp_dump_cb(void *arg)
+{
+    (void)arg;
+    s_arp_count = 0;
+    for (int i = 0; i < ARP_TABLE_SIZE && s_arp_count < ARP_DUMP_MAX_ENTRIES; i++) {
+        ip4_addr_t *ipaddr;
+        struct netif *netif;
+        struct eth_addr *ethaddr;
+        if (etharp_get_entry((size_t)i, &ipaddr, &netif, &ethaddr)) {
+            s_arp_ip_h[s_arp_count++] = ntohl(ipaddr->addr);
+        }
+    }
+    xSemaphoreGive(s_arp_done_sem);
+}
+
+/* Snapshot of whatever's currently in lwIP's ARP cache, host-order IPs.
+ * Cheap and safe to call often (e.g. once per ping batch, see
+ * run_one_pass()) -- no network I/O of its own, just one hop onto the
+ * tcpip thread and back. Uses the single long-lived s_arp_done_sem rather
+ * than creating/deleting a semaphore per call -- this only ever runs
+ * serially from within net_scan_task, so one reusable semaphore (created
+ * once in net_scan_init(), same lifecycle as s_lock/s_batch_sem) is enough
+ * and avoids adding heap churn to a loop that already runs many times per
+ * pass. Returns the number of entries written to out_ip_h (0 on any
+ * failure, including a timeout waiting for the tcpip thread -- not
+ * expected in practice, but this must never hang the scan task). */
+static size_t arp_dump_snapshot(uint32_t *out_ip_h, size_t max_out)
+{
+    size_t n = 0;
+    if (tcpip_callback(arp_dump_cb, NULL) == ERR_OK &&
+        xSemaphoreTake(s_arp_done_sem, pdMS_TO_TICKS(ARP_CALLBACK_WAIT_MS)) == pdTRUE) {
+        n = s_arp_count < max_out ? s_arp_count : max_out;
+        memcpy(out_ip_h, s_arp_ip_h, n * sizeof(uint32_t));
+    }
+    return n;
+}
+
 static bool stop_requested_locked(void)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -505,6 +593,45 @@ static void run_one_pass(uint32_t ip_h, uint32_t first_h, uint32_t last_h, uint3
                 r->http_open = http_open;
             }
             xSemaphoreGive(s_lock);
+        }
+
+        /* ARP-cache fallback (see arp_dump_snapshot()'s comment): only
+         * worth checking on batches that actually attempted new pings --
+         * this batch's ARP resolutions (successful or not) are the ones
+         * most likely to still be sitting in the table right now, before
+         * later batches' own resolutions evict them (lwIP's ARP table only
+         * holds ARP_TABLE_SIZE entries total, shared across the whole
+         * scan). Gating on `started > 0` also means an already-fully-
+         * discovered subnet's later passes -- where every host gets
+         * skip-counted with no I/O at all -- don't pay for this either. */
+        if (started > 0) {
+            uint32_t arp_ips[ARP_DUMP_MAX_ENTRIES];
+            size_t arp_n = arp_dump_snapshot(arp_ips, ARP_DUMP_MAX_ENTRIES);
+            for (size_t i = 0; i < arp_n; i++) {
+                uint32_t h = arp_ips[i];
+                if (h == ip_h || h < first_h || h > last_h) continue;
+
+                char ip_str[16];
+                ip_h_to_str(h, ip_str, sizeof(ip_str));
+                if (ip_already_known(ip_str)) continue;
+
+                /* Still worth a TCP:80 probe -- an ARP-only find can very
+                 * well have a web server (it might just be dropping ICMP
+                 * specifically, not everything), and that's what feeds
+                 * identify_new_results()'s fingerprint pass right after
+                 * this pass finishes. */
+                bool http_open = quick_tcp_probe(h, HTTP_PROBE_PORT, HTTP_PROBE_TIMEOUT_MS);
+
+                xSemaphoreTake(s_lock, portMAX_DELAY);
+                if (s_status.result_count < NET_SCAN_MAX_RESULTS) {
+                    net_scan_result_t *r = &s_status.results[s_status.result_count++];
+                    memset(r, 0, sizeof(*r));
+                    memcpy(r->ip, ip_str, sizeof(r->ip));
+                    r->http_open = http_open;
+                    r->via_arp = true;
+                }
+                xSemaphoreGive(s_lock);
+            }
         }
 
         /* See SCAN_BATCH_BREATHER_MS's comment -- only worth the delay if
@@ -706,7 +833,8 @@ esp_err_t net_scan_init(void)
 {
     s_lock = xSemaphoreCreateMutex();
     s_batch_sem = xSemaphoreCreateCounting(CONCURRENCY, 0);
-    if (!s_lock || !s_batch_sem) return ESP_ERR_NO_MEM;
+    s_arp_done_sem = xSemaphoreCreateBinary();
+    if (!s_lock || !s_batch_sem || !s_arp_done_sem) return ESP_ERR_NO_MEM;
     memset(&s_status, 0, sizeof(s_status));
 
     /* A ping_sock session-creation failure here is not a bug -- it's fully

@@ -410,7 +410,7 @@
     tr.innerHTML = `
       <td>
         <div class="scan-name">${r.name ? escapeHtml(r.name) : '<span class="hint">без імені</span>'}</div>
-        <div class="scan-ip hint">${escapeHtml(r.ip)}</div>
+        <div class="scan-ip hint">${escapeHtml(r.ip)}${r.via_arp ? ' <span title="Не відповідає на ping — знайдено через ARP-кеш">(ARP)</span>' : ''}</div>
       </td>
       <td>${typeCell}</td>
       <td>${r.http ? '<span class="pill on">так</span>' : '<span class="pill off">ні</span>'}</td>`;

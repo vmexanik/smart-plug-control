@@ -23,8 +23,11 @@ extern "C" {
  *
  * Scope/limits (see README "Автопошук у мережі" for the full list,
  * including what was intentionally left out of the uploaded discovery
- * spec this was adapted from -- mDNS, raw-ARP/MAC-keyed caching, ESPHome's
- * native binary API, Sonoff DIY):
+ * spec this was adapted from -- mDNS [later added anyway, see the
+ * reverse-DNS section below], ESPHome's native binary API, Sonoff DIY).
+ * Passive ARP-cache reading (not raw ARP packet capture) was added later
+ * too, as a fallback for hosts that answer ARP but silently drop ICMP/TCP
+ * -- see arp_dump_snapshot() in net_scan.c:
  *  - Only sweeps the STA interface's subnet (capped to a /24-sized window).
  *    Devices on the fallback AP's 192.168.4.0/24, or on a different VLAN/
  *    subnet than the hub, will not be found.
@@ -42,6 +45,17 @@ extern "C" {
 typedef struct {
     char ip[16];      /* dotted-quad */
     bool http_open;   /* quick TCP:80 connect succeeded -- hint only */
+
+    /* True if this host was found only through lwIP's ARP cache (it never
+     * answered a ping/TCP:80 probe of ours) -- see net_scan.c's
+     * arp_dump_snapshot() for why this exists: a host can drop ICMP echo
+     * and refuse TCP:80 outright (default Windows Firewall, and no small
+     * amount of IoT firmware) while its NIC still has to answer ARP for
+     * basic L2 connectivity to work at all. http_open may still be true
+     * here too (the TCP:80 probe is still attempted for ARP-only finds,
+     * same as any other host) -- this flag only says *how* the host was
+     * first noticed, not what it can do. */
+    bool via_arp;
 
     /* Best-effort reverse-DNS (PTR) hostname, resolved against the STA's
      * DNS server (normally the router). Empty string if the router didn't
