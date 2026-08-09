@@ -10,6 +10,7 @@ idf_component_register(
         "driver_mqtt.c"
         "driver_zigbee.c"
         "web_server.c"
+        "cJSON.c"
     INCLUDE_DIRS "."
     EMBED_FILES
         "web/index.html"
@@ -22,9 +23,8 @@ idf_component_register(
         esp_event
         esp_http_server
         esp_http_client
-        mqtt
-        json
-        driver
+        espressif__mqtt
+        esp_driver_gpio
         esp_timer
         joltwallet__littlefs
 )
