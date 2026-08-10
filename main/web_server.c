@@ -31,6 +31,8 @@ extern const uint8_t web_app_js_start[] asm("_binary_app_js_start");
 extern const uint8_t web_app_js_end[]   asm("_binary_app_js_end");
 extern const uint8_t web_style_css_start[] asm("_binary_style_css_start");
 extern const uint8_t web_style_css_end[]   asm("_binary_style_css_end");
+extern const uint8_t web_favicon_svg_start[] asm("_binary_favicon_svg_start");
+extern const uint8_t web_favicon_svg_end[]   asm("_binary_favicon_svg_end");
 
 /* ---------------------------------------------------------------------- */
 /* helpers                                                                */
@@ -306,6 +308,17 @@ static esp_err_t h_style_css(httpd_req_t *req)
     httpd_resp_set_type(req, "text/css");
     return httpd_resp_send(req, (const char *)web_style_css_start,
                             web_style_css_end - web_style_css_start);
+}
+
+static esp_err_t h_favicon(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "image/svg+xml");
+    /* Cheap to keep in the browser's cache -- it never changes without a
+     * firmware reflash, and re-fetching it on every tab reload/navigation
+     * is one more request the single-worker httpd doesn't need to serve. */
+    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=86400");
+    return httpd_resp_send(req, (const char *)web_favicon_svg_start,
+                            web_favicon_svg_end - web_favicon_svg_start);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -637,7 +650,6 @@ static esp_err_t h_wifi_scan_status(httpd_req_t *req)
         if (!wifi_manager_get_scan_result(i, &r)) break;
         cJSON *o = cJSON_CreateObject();
         cJSON_AddStringToObject(o, "ssid", r.ssid);
-        cJSON_AddNumberToObject(o, "rssi", r.rssi);
         cJSON_AddBoolToObject(o, "secure", r.secure);
         cJSON_AddItemToArray(arr, o);
     }
@@ -746,7 +758,7 @@ static esp_err_t h_scan_status(httpd_req_t *req)
         cJSON_AddStringToObject(o, "ip", r.ip);
         cJSON_AddStringToObject(o, "name", r.name);
         cJSON_AddBoolToObject(o, "http", r.http_open);
-        cJSON_AddBoolToObject(o, "via_arp", r.via_arp);
+        cJSON_AddBoolToObject(o, "ping_ok", r.ping_ok);
         cJSON_AddStringToObject(o, "family", plug_family_label(r.family));
         cJSON_AddStringToObject(o, "kind", plug_kind_label(r.kind));
         cJSON_AddStringToObject(o, "model", r.model);
@@ -788,6 +800,12 @@ esp_err_t web_server_start(void)
         { .uri = "/index.html",    .method = HTTP_GET,    .handler = h_index },
         { .uri = "/app.js",        .method = HTTP_GET,    .handler = h_app_js },
         { .uri = "/style.css",     .method = HTTP_GET,    .handler = h_style_css },
+        { .uri = "/favicon.svg",   .method = HTTP_GET,    .handler = h_favicon },
+        /* Browsers request /favicon.ico by default even when a <link
+         * rel="icon"> points elsewhere (e.g. before the HTML has loaded, or
+         * just as a fallback probe) -- serve the same SVG there too instead
+         * of leaving it a 404 in the log every single page load. */
+        { .uri = "/favicon.ico",   .method = HTTP_GET,    .handler = h_favicon },
         { .uri = "/api/plugs",     .method = HTTP_GET,    .handler = h_plugs_get },
         { .uri = "/api/plugs",     .method = HTTP_POST,   .handler = h_plugs_post },
         { .uri = "/api/plugs/*",   .method = HTTP_PUT,    .handler = h_plugs_wildcard },

@@ -28,30 +28,57 @@
 
 static const char *TAG = "net_scan";
 
-/* How many ping sessions run at once. Each spins up its own small FreeRTOS
- * task internally (esp_ping) AND holds a raw socket for its lifetime, so
- * this bounds peak RAM/task/socket usage rather than sweeping all ~254
- * hosts of a /24 concurrently. Also competes for the same LWIP socket pool
- * (CONFIG_LWIP_MAX_SOCKETS, see sdkconfig.defaults) as the httpd server, AP
- * DHCP, and fingerprint.c's HTTP client.
+/* --- Active ARP probing: the primary discovery mechanism -----------------
  *
- * History: was 4 (already reduced once from 8 for the same "create ping
- * task/socket failed" reason), then 2, then 1 (fully serial) while chasing
- * that error down -- see net_scan_init()'s comment for why a session-
- * creation failure was never actually unsafe, just noisy. Real hardware
- * logs showed 50KB+ free internal SRAM at scan start and the handful of
- * failures that did happen at CONCURRENCY=2 all coincided with an unrelated
- * one-time SNTP sync -- i.e. rare transient contention, not a hard ceiling.
- * Back up to 2 as the speed/safety tradeoff: still far short of the
- * original 4 that failed badly, but noticeably faster than dead serial. */
-#define CONCURRENCY            2
-/* How long to wait for a reply before giving up on a host. 250ms was overly
- * generous for a LAN (real replies land in single-digit-to-low-tens of ms);
- * 120ms cuts a full pass's dead time roughly in half for the (usual) case
- * of a mostly-empty subnet, at the cost of maybe missing a genuinely
- * slow/loaded device once in a while -- acceptable since continuous
- * scanning (see net_scan_start()) retries it again a few passes later
- * anyway (SCAN_RETRY_STRIDE), it's not a one-shot final answer. */
+ * A host's NIC must answer ARP for basic L2 connectivity to work at all --
+ * far more hosts answer "who has this IP" than answer ICMP echo or accept
+ * a TCP SYN (default Windows Firewall, plenty of IoT firmware, both drop
+ * ICMP/TCP outright while still answering ARP, since they have no choice
+ * about the latter). Earlier versions of this scanner pinged the whole
+ * subnet and only *incidentally* benefited from ARP (lwIP has to resolve
+ * a target's MAC before it can even attempt a ping/TCP connect, so ARP
+ * happened as an unavoidable side effect) -- reading that already-happening
+ * resolution was cheap and added as a fallback. This version flips it:
+ * ARP resolution is triggered *deliberately and first*, for every address
+ * in the subnet, and ping is now just a secondary confirmation step run
+ * only against hosts ARP already proved are alive (see run_one_pass()).
+ *
+ * Deliberately NOT done via lwIP's own etharp_request() (which needs a raw
+ * `struct netif *`, meaning either exposing wifi_manager's internal STA
+ * netif or reaching for esp_netif_get_netif_impl() -- a function whose own
+ * header explicitly says it's "supposed to be called only from internals
+ * of TCP/IP stack"). Instead: a single UDP socket, reused for the whole
+ * scan session, does a plain sendto() to each candidate address on
+ * ARP_PROBE_UDP_PORT. The payload and any reply (there usually isn't one --
+ * nothing is listening on that port) are irrelevant and never read; the
+ * only thing this is for is making lwIP resolve the destination's MAC
+ * before it can even attempt to route the packet, which is the exact same
+ * mechanism ping/TCP already relied on, just triggered directly through
+ * fully public BSD socket calls instead of lwIP-internal ones. sendto()
+ * doesn't block waiting for that resolution (lwIP queues the packet and
+ * resolves in the background via the tcpip thread), so a whole batch of
+ * addresses can be probed back-to-back near-instantly. */
+#define ARP_PROBE_BATCH_SIZE 8      /* stays under ARP_TABLE_SIZE (10, see arp_dump_snapshot()) so
+                                      * one batch's own replies don't evict each other before the
+                                      * settle delay below is up and the table gets read */
+#define ARP_PROBE_UDP_PORT   40404  /* arbitrary, high, extremely unlikely to have anything actually
+                                      * listening -- doesn't matter either way, see above */
+#define ARP_SETTLE_MS        200    /* time to let ARP replies land in the table after a probe batch
+                                      * -- generous for a LAN, where real replies land in single-digit
+                                      * milliseconds */
+
+/* Secondary confirmation ping, run only against hosts ARP already proved
+ * are alive (see run_one_pass()) -- one at a time, not batched/parallel,
+ * since by this point the candidate list is typically a handful of real
+ * devices rather than a whole /24, so there's no need for the CONCURRENCY-
+ * style parallel session juggling the old ping-primary design needed (and
+ * which was the original source of "create ping task failed" under load --
+ * see README). 250ms was overly generous for a LAN (real replies land in
+ * single-digit-to-low-tens of ms); 120ms is still generous while keeping a
+ * pass fast, at the cost of maybe missing a genuinely slow/loaded device's
+ * ping reply once in a while -- doesn't matter much since this is now only
+ * an informational "did it also answer ping" flag, not what gates
+ * inclusion in the results at all (ARP presence alone does that). */
 #define PING_TIMEOUT_MS        120
 #define HTTP_PROBE_TIMEOUT_MS  200
 #define HTTP_PROBE_PORT        80
@@ -60,10 +87,11 @@ static const char *TAG = "net_scan";
  * a tight loop, and a hard safety cap so an abandoned scan (browser tab
  * closed without hitting "stop") doesn't run forever draining the radio. */
 #define SCAN_PASS_IDLE_MS      2500
-/* Extra breather between each CONCURRENCY-sized ping batch *within* a
- * pass -- gives FreeRTOS's idle task a moment to actually reclaim each
- * batch's just-deleted ping session tasks before the next batch asks for
- * new ones, instead of pure back-to-back create/delete churn. */
+/* Extra breather after each ARP-probe batch *within* a pass -- keeps the
+ * pass from being one unbroken tight loop; cheap insurance, same spirit as
+ * the old ping-batch breather even though the resource-churn risk that
+ * originally motivated it (per-host ping task/socket creation) mostly went
+ * away with ping no longer being the primary sweep mechanism. */
 #define SCAN_BATCH_BREATHER_MS 15
 /* From the 2nd pass onward, a host that has never once responded is only
  * actually pinged in 1 out of this many passes (still counted as "scanned"
@@ -99,8 +127,8 @@ typedef struct {
 } net_scan_full_status_t;
 
 static SemaphoreHandle_t s_lock;
-static SemaphoreHandle_t s_batch_sem;
-static SemaphoreHandle_t s_arp_done_sem; /* see arp_dump_snapshot() */
+static SemaphoreHandle_t s_ping_done_sem; /* one ping in flight at a time, see do_single_ping() */
+static SemaphoreHandle_t s_arp_done_sem;  /* see arp_dump_snapshot() */
 static net_scan_full_status_t s_status;
 
 typedef struct {
@@ -128,7 +156,71 @@ static void on_ping_end(esp_ping_handle_t hdl, void *args)
     /* Deleting the session from within its own end-callback is the pattern
      * used by ESP-IDF's own ping example/component. */
     esp_ping_delete_session(hdl);
-    xSemaphoreGive(s_batch_sem);
+    xSemaphoreGive(s_ping_done_sem);
+}
+
+/* Actively triggers ARP resolution for up to ARP_PROBE_BATCH_SIZE
+ * addresses via plain UDP sendto() calls on the caller-owned socket `sock`
+ * -- see the ARP_PROBE_* constants' block comment above for why this
+ * approach (rather than lwIP's etharp_request()) was chosen. Fire-and-
+ * forget: return value of each sendto() is intentionally ignored, and
+ * there is no reply to wait for -- the caller is expected to wait
+ * ARP_SETTLE_MS and then check arp_dump_snapshot() to see who answered. */
+static void arp_probe_batch(int sock, const uint32_t *ip_h, size_t count)
+{
+    if (sock < 0) return;
+    uint8_t payload = 0;
+    for (size_t i = 0; i < count; i++) {
+        struct sockaddr_in dst = {0};
+        dst.sin_family = AF_INET;
+        dst.sin_port = htons(ARP_PROBE_UDP_PORT);
+        dst.sin_addr.s_addr = htonl(ip_h[i]);
+        sendto(sock, &payload, sizeof(payload), 0, (struct sockaddr *)&dst, sizeof(dst));
+    }
+}
+
+/* Secondary confirmation ping against a single host already known (via ARP)
+ * to be alive -- see the PING_TIMEOUT_MS block comment for why this is now
+ * one-at-a-time rather than the old CONCURRENCY-parallel design. Returns
+ * whether it replied; a false here is informational only (net_scan_result_t
+ * .ping_ok), it does not remove the host from the results -- ARP already
+ * proved it's there. */
+static bool do_single_ping(uint32_t ip_h)
+{
+    static ping_ctx_t ctx;
+    static esp_ping_handle_t hdl;
+
+    char ip_str[16];
+    ip_h_to_str(ip_h, ip_str, sizeof(ip_str));
+    ip4_addr_t ip4;
+    if (!ip4addr_aton(ip_str, &ip4)) return false;
+
+    ctx.ip_h = ip_h;
+    ctx.got_reply = false;
+
+    esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
+    cfg.count = 1;
+    cfg.timeout_ms = PING_TIMEOUT_MS;
+    cfg.interval_ms = PING_TIMEOUT_MS;
+    cfg.data_size = 0;
+    cfg.task_stack_size = 3072;
+    cfg.task_prio = 2;
+    ip_addr_copy_from_ip4(cfg.target_addr, ip4);
+
+    esp_ping_callbacks_t cbs = {
+        .cb_args = &ctx,
+        .on_ping_success = on_ping_success,
+        .on_ping_timeout = NULL,
+        .on_ping_end = on_ping_end,
+    };
+
+    if (esp_ping_new_session(&cfg, &cbs, &hdl) != ESP_OK) return false;
+    if (esp_ping_start(hdl) != ESP_OK) {
+        esp_ping_delete_session(hdl);
+        return false;
+    }
+    xSemaphoreTake(s_ping_done_sem, pdMS_TO_TICKS(PING_TIMEOUT_MS + 200));
+    return ctx.got_reply;
 }
 
 /* Best-effort non-blocking TCP connect used only as a hint ("this host has
@@ -367,21 +459,15 @@ static bool reverse_dns_lookup(const char *ip_str, uint32_t dns_ip_h, char *out,
     return false;
 }
 
-/* --- ARP-cache fallback ----------------------------------------------------
+/* --- Reading lwIP's ARP cache ----------------------------------------------
  *
- * Ping and TCP:80 both require lwIP to ARP-resolve the target's MAC before
- * it can send anything at all -- that resolution succeeding gets recorded
- * in lwIP's own ARP table regardless of what happens next. Some hosts
- * answer that ARP resolution just fine (their NIC/IP stack has to, or
- * nothing works) and then silently drop the ICMP echo or refuse the TCP
- * SYN outright -- a default Windows Firewall does exactly this, and so
- * does a fair amount of IoT firmware. Ping-only scanning has always missed
- * these; reading the ARP table catches them for free, no extra packets of
- * our own.
- *
- * This reads lwIP's *cache*, it does not send raw ARP frames itself (that
- * would need promiscuous-mode capture on the Wi-Fi driver, a much bigger
- * and riskier change -- see net_scan.h's scope note).
+ * The other half of active ARP probing (see the ARP_PROBE_* constants
+ * above): arp_probe_batch() triggers resolution, this reads the result.
+ * lwIP records every successful ARP resolution in its own table regardless
+ * of *why* the resolution happened -- our own deliberate probe, an
+ * incidental ping/TCP attempt, or even another device's passing gratuitous
+ * ARP/broadcast -- so this doubles as a completely free (no packets of our
+ * own) way to notice hosts between probe batches too.
  *
  * ESP-IDF's lwIP port runs with LWIP_TCPIP_CORE_LOCKING *off* by default
  * (see sdkconfig / components/lwip/Kconfig) -- LOCK_TCPIP_CORE()/
@@ -431,12 +517,12 @@ static void arp_dump_cb(void *arg)
 }
 
 /* Snapshot of whatever's currently in lwIP's ARP cache, host-order IPs.
- * Cheap and safe to call often (e.g. once per ping batch, see
+ * Cheap and safe to call often (e.g. once per ARP-probe batch, see
  * run_one_pass()) -- no network I/O of its own, just one hop onto the
  * tcpip thread and back. Uses the single long-lived s_arp_done_sem rather
  * than creating/deleting a semaphore per call -- this only ever runs
  * serially from within net_scan_task, so one reusable semaphore (created
- * once in net_scan_init(), same lifecycle as s_lock/s_batch_sem) is enough
+ * once in net_scan_init(), same lifecycle as s_lock/s_ping_done_sem) is enough
  * and avoids adding heap churn to a loop that already runs many times per
  * pass. Returns the number of entries written to out_ip_h (0 on any
  * failure, including a timeout waiting for the tcpip thread -- not
@@ -474,113 +560,83 @@ static bool ip_already_known(const char *ip_str)
     return known;
 }
 
-/* One ping sweep of [first_h, last_h], skipping hosts already known from an
- * earlier pass -- and, from pass 2 onward, skipping most not-yet-found
- * hosts too (see SCAN_RETRY_STRIDE), only actually pinging 1/SCAN_RETRY_STRIDE
- * of them so a long continuous scan doesn't keep re-hammering the whole
- * subnet every ~2.5s. Appends newly-responding hosts to results[] (with
- * http_open filled in; family/kind/name still blank -- that's the caller's
- * job right after this returns). Returns early without finishing the sweep
- * if a stop is requested mid-pass, same as a normal pass end otherwise. */
-static void run_one_pass(uint32_t ip_h, uint32_t first_h, uint32_t last_h, uint32_t pass_no)
+static void count_scanned(void)
 {
-    static ping_ctx_t ctxs[CONCURRENCY];
-    static esp_ping_handle_t hdls[CONCURRENCY];
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_status.scanned++;
+    xSemaphoreGive(s_lock);
+}
 
-    for (uint32_t base = first_h; base <= last_h; base += CONCURRENCY) {
+/* One ARP-probe sweep of [first_h, last_h], skipping hosts already known
+ * from an earlier pass -- and, from pass 2 onward, skipping most
+ * not-yet-found hosts too (see SCAN_RETRY_STRIDE), only actually probing
+ * 1/SCAN_RETRY_STRIDE of them so a long continuous scan doesn't keep
+ * re-hammering the whole subnet every ~2.5s.
+ *
+ * Per batch of up to ARP_PROBE_BATCH_SIZE candidate addresses: trigger ARP
+ * resolution (arp_probe_batch()), wait for replies to settle, then read the
+ * ARP table (arp_dump_snapshot()) -- any address in there that isn't
+ * already known is a newly-discovered host. For each: a single confirmation
+ * ping (informational -- .ping_ok, does not gate inclusion) and the usual
+ * TCP:80 probe, then appended to results[] (family/kind/name still blank --
+ * that's identify_new_results()'s job right after this returns).
+ *
+ * Returns early without finishing the sweep if a stop is requested
+ * mid-pass, same as a normal pass end otherwise. */
+static void run_one_pass(int arp_sock, uint32_t ip_h, uint32_t first_h, uint32_t last_h, uint32_t pass_no)
+{
+    uint32_t batch_ips[ARP_PROBE_BATCH_SIZE];
+
+    for (uint32_t base = first_h; base <= last_h; base += ARP_PROBE_BATCH_SIZE) {
         if (stop_requested_locked()) return;
 
-        int started = 0;
-
-        for (int i = 0; i < CONCURRENCY; i++) {
-            uint32_t h = base + (uint32_t)i;
-            if (h > last_h) break;
-            if (h == ip_h) {
-                /* that's us -- don't ping ourselves, just count it as scanned */
-                xSemaphoreTake(s_lock, portMAX_DELAY);
-                s_status.scanned++;
-                xSemaphoreGive(s_lock);
-                continue;
-            }
+        size_t batch_n = 0;
+        for (uint32_t h = base; h < base + ARP_PROBE_BATCH_SIZE && h <= last_h; h++) {
+            if (h == ip_h) { count_scanned(); continue; } /* that's us */
 
             char ip_str[16];
             ip_h_to_str(h, ip_str, sizeof(ip_str));
             ip4_addr_t ip4;
-            if (!ip4addr_aton(ip_str, &ip4)) {
-                xSemaphoreTake(s_lock, portMAX_DELAY);
-                s_status.scanned++;
-                xSemaphoreGive(s_lock);
-                continue;
-            }
+            if (!ip4addr_aton(ip_str, &ip4)) { count_scanned(); continue; }
 
-            /* Already found in an earlier pass -- don't waste a ping
-             * session/socket re-checking it. Still counts as "scanned" for
-             * this pass's progress display. */
-            if (ip_already_known(ip_str)) {
-                xSemaphoreTake(s_lock, portMAX_DELAY);
-                s_status.scanned++;
-                xSemaphoreGive(s_lock);
-                continue;
-            }
+            /* Already found in an earlier pass -- don't re-probe it. Still
+             * counts as "scanned" for this pass's progress display. */
+            if (ip_already_known(ip_str)) { count_scanned(); continue; }
 
-            /* Not yet found, and not the first pass -- only actually ping
+            /* Not yet found, and not the first pass -- only actually probe
              * this host on 1 out of every SCAN_RETRY_STRIDE passes (which
              * one depends on its address, so different hosts get retried on
              * different passes rather than all bunching up together). */
             if (pass_no > 1 && ((h - first_h + pass_no) % SCAN_RETRY_STRIDE) != 0) {
-                xSemaphoreTake(s_lock, portMAX_DELAY);
-                s_status.scanned++;
-                xSemaphoreGive(s_lock);
+                count_scanned();
                 continue;
             }
 
-            ctxs[started].ip_h = h;
-            ctxs[started].got_reply = false;
-
-            esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
-            cfg.count = 1;
-            cfg.timeout_ms = PING_TIMEOUT_MS;
-            cfg.interval_ms = PING_TIMEOUT_MS;
-            cfg.data_size = 0;
-            cfg.task_stack_size = 3072;
-            cfg.task_prio = 2;
-            ip_addr_copy_from_ip4(cfg.target_addr, ip4);
-
-            esp_ping_callbacks_t cbs = {
-                .cb_args = &ctxs[started],
-                .on_ping_success = on_ping_success,
-                .on_ping_timeout = NULL,
-                .on_ping_end = on_ping_end,
-            };
-
-            if (esp_ping_new_session(&cfg, &cbs, &hdls[started]) == ESP_OK) {
-                if (esp_ping_start(hdls[started]) == ESP_OK) {
-                    started++;
-                } else {
-                    esp_ping_delete_session(hdls[started]);
-                    xSemaphoreTake(s_lock, portMAX_DELAY);
-                    s_status.scanned++;
-                    xSemaphoreGive(s_lock);
-                }
-            } else {
-                xSemaphoreTake(s_lock, portMAX_DELAY);
-                s_status.scanned++;
-                xSemaphoreGive(s_lock);
-            }
+            batch_ips[batch_n++] = h;
         }
 
-        for (int i = 0; i < started; i++) {
-            xSemaphoreTake(s_batch_sem, portMAX_DELAY);
-        }
+        if (batch_n == 0) continue;
 
-        for (int i = 0; i < started; i++) {
-            xSemaphoreTake(s_lock, portMAX_DELAY);
-            s_status.scanned++;
-            xSemaphoreGive(s_lock);
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_status.scanned += batch_n;
+        xSemaphoreGive(s_lock);
 
-            if (!ctxs[i].got_reply) continue;
+        arp_probe_batch(arp_sock, batch_ips, batch_n);
+        vTaskDelay(pdMS_TO_TICKS(ARP_SETTLE_MS));
 
-            bool http_open = quick_tcp_probe(ctxs[i].ip_h, HTTP_PROBE_PORT, HTTP_PROBE_TIMEOUT_MS);
+        uint32_t arp_ips[ARP_DUMP_MAX_ENTRIES];
+        size_t arp_n = arp_dump_snapshot(arp_ips, ARP_DUMP_MAX_ENTRIES);
+
+        for (size_t i = 0; i < arp_n; i++) {
+            uint32_t h = arp_ips[i];
+            if (h == ip_h || h < first_h || h > last_h) continue;
+
+            char ip_str[16];
+            ip_h_to_str(h, ip_str, sizeof(ip_str));
+            if (ip_already_known(ip_str)) continue;
+
+            bool ping_ok = do_single_ping(h);
+            bool http_open = quick_tcp_probe(h, HTTP_PROBE_PORT, HTTP_PROBE_TIMEOUT_MS);
 
             xSemaphoreTake(s_lock, portMAX_DELAY);
             if (s_status.result_count < NET_SCAN_MAX_RESULTS) {
@@ -589,56 +645,14 @@ static void run_one_pass(uint32_t ip_h, uint32_t first_h, uint32_t last_h, uint3
                  * model/URLs) at the same index -- clear it so nothing stale
                  * leaks into a report about a different IP. */
                 memset(r, 0, sizeof(*r));
-                ip_h_to_str(ctxs[i].ip_h, r->ip, sizeof(r->ip));
+                memcpy(r->ip, ip_str, sizeof(r->ip));
                 r->http_open = http_open;
+                r->ping_ok = ping_ok;
             }
             xSemaphoreGive(s_lock);
         }
 
-        /* ARP-cache fallback (see arp_dump_snapshot()'s comment): only
-         * worth checking on batches that actually attempted new pings --
-         * this batch's ARP resolutions (successful or not) are the ones
-         * most likely to still be sitting in the table right now, before
-         * later batches' own resolutions evict them (lwIP's ARP table only
-         * holds ARP_TABLE_SIZE entries total, shared across the whole
-         * scan). Gating on `started > 0` also means an already-fully-
-         * discovered subnet's later passes -- where every host gets
-         * skip-counted with no I/O at all -- don't pay for this either. */
-        if (started > 0) {
-            uint32_t arp_ips[ARP_DUMP_MAX_ENTRIES];
-            size_t arp_n = arp_dump_snapshot(arp_ips, ARP_DUMP_MAX_ENTRIES);
-            for (size_t i = 0; i < arp_n; i++) {
-                uint32_t h = arp_ips[i];
-                if (h == ip_h || h < first_h || h > last_h) continue;
-
-                char ip_str[16];
-                ip_h_to_str(h, ip_str, sizeof(ip_str));
-                if (ip_already_known(ip_str)) continue;
-
-                /* Still worth a TCP:80 probe -- an ARP-only find can very
-                 * well have a web server (it might just be dropping ICMP
-                 * specifically, not everything), and that's what feeds
-                 * identify_new_results()'s fingerprint pass right after
-                 * this pass finishes. */
-                bool http_open = quick_tcp_probe(h, HTTP_PROBE_PORT, HTTP_PROBE_TIMEOUT_MS);
-
-                xSemaphoreTake(s_lock, portMAX_DELAY);
-                if (s_status.result_count < NET_SCAN_MAX_RESULTS) {
-                    net_scan_result_t *r = &s_status.results[s_status.result_count++];
-                    memset(r, 0, sizeof(*r));
-                    memcpy(r->ip, ip_str, sizeof(r->ip));
-                    r->http_open = http_open;
-                    r->via_arp = true;
-                }
-                xSemaphoreGive(s_lock);
-            }
-        }
-
-        /* See SCAN_BATCH_BREATHER_MS's comment -- only worth the delay if
-         * this batch actually created ping sessions to clean up after. */
-        if (started > 0) {
-            vTaskDelay(pdMS_TO_TICKS(SCAN_BATCH_BREATHER_MS));
-        }
+        vTaskDelay(pdMS_TO_TICKS(SCAN_BATCH_BREATHER_MS));
     }
 }
 
@@ -777,14 +791,34 @@ static void net_scan_task(void *arg)
     s_status.total = total;
     xSemaphoreGive(s_lock);
 
+    /* One UDP socket for the whole scan session (all passes), reused for
+     * every arp_probe_batch() call -- see the ARP_PROBE_* constants' block
+     * comment for why a socket-based probe was chosen over lwIP-internal
+     * etharp_request(). Bind to the STA's own address first: this device
+     * runs APSTA (its own fallback AP is always up alongside the STA
+     * link), so without an explicit bind an outgoing probe could just as
+     * easily leave via the SoftAP interface instead of the STA's actual
+     * LAN -- same precaution reverse_dns_lookup()'s socket already takes,
+     * for the same reason. */
+    int arp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (arp_sock < 0) {
+        ESP_LOGW(TAG, "could not open ARP-probe socket (errno=%d) -- scan will only find hosts "
+                 "that answer ARP passively (gratuitous/other-host traffic), not ones actively probed", errno);
+    } else {
+        struct sockaddr_in local = {0};
+        local.sin_family = AF_INET;
+        local.sin_addr.s_addr = ip_info.ip.addr;
+        bind(arp_sock, (struct sockaddr *)&local, sizeof(local));
+    }
+
     ESP_LOGI(TAG, "continuous scan starting: %u hosts around " IPSTR "/%u per pass",
              (unsigned)total, IP2STR(&ip_info.ip), (unsigned)__builtin_popcount(mask_h));
-    /* Internal SRAM specifically -- task stacks (incl. the ping sessions
-     * about to be created) can't be satisfied from PSRAM, so the combined
-     * "free heap" figure would be misleading here. See CONCURRENCY's
-     * comment for why this can run low: several other tasks permanently
-     * reserve a large stack each regardless of whether they're doing
-     * anything at the moment. */
+    /* Internal SRAM specifically -- task stacks can't be satisfied from
+     * PSRAM, so the combined "free heap" figure would be misleading here.
+     * Several other tasks permanently reserve a large stack each
+     * regardless of whether they're doing anything at the moment -- see
+     * plug_manager.c/README for the fuller history of why this is worth
+     * keeping an eye on. */
     ESP_LOGI(TAG, "free internal SRAM before scan: %u bytes",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
@@ -805,7 +839,7 @@ static void net_scan_task(void *arg)
         xSemaphoreGive(s_lock);
 
         ESP_LOGI(TAG, "pass %u starting (%u known so far)", (unsigned)pass_no, (unsigned)pass_start_count);
-        run_one_pass(ip_h, first_h, last_h, pass_no);
+        run_one_pass(arp_sock, ip_h, first_h, last_h, pass_no);
         if (stop_requested_locked()) break;
 
         identify_new_results(pass_start_count);
@@ -818,6 +852,8 @@ static void net_scan_task(void *arg)
         if (stop_requested_locked()) break;
         vTaskDelay(pdMS_TO_TICKS(SCAN_PASS_IDLE_MS));
     }
+
+    if (arp_sock >= 0) close(arp_sock);
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_status.fingerprinting = false;
@@ -832,17 +868,18 @@ static void net_scan_task(void *arg)
 esp_err_t net_scan_init(void)
 {
     s_lock = xSemaphoreCreateMutex();
-    s_batch_sem = xSemaphoreCreateCounting(CONCURRENCY, 0);
+    s_ping_done_sem = xSemaphoreCreateBinary();
     s_arp_done_sem = xSemaphoreCreateBinary();
-    if (!s_lock || !s_batch_sem || !s_arp_done_sem) return ESP_ERR_NO_MEM;
+    if (!s_lock || !s_ping_done_sem || !s_arp_done_sem) return ESP_ERR_NO_MEM;
     memset(&s_status, 0, sizeof(s_status));
 
     /* A ping_sock session-creation failure here is not a bug -- it's fully
-     * handled already: that host just gets treated as "no reply this
-     * attempt" and, since it's not in results[], SCAN_RETRY_STRIDE makes
-     * sure it's tried again on a later pass (see run_one_pass()). The
-     * component's own ESP_LOGE for it is just alarming console noise for
-     * something the continuous scan already recovers from on its own. */
+     * handled already (do_single_ping() just returns false, and that host
+     * still gets added to results[] with ping_ok=false since ARP already
+     * proved it exists -- ping is only a secondary confirmation now, it no
+     * longer gates discovery). The component's own ESP_LOGE for a session-
+     * creation failure is just alarming console noise for something this
+     * design already tolerates gracefully. */
     esp_log_level_set("ping_sock", ESP_LOG_NONE);
 
     return ESP_OK;
@@ -915,4 +952,11 @@ bool net_scan_get_result(size_t index, net_scan_result_t *out)
     }
     xSemaphoreGive(s_lock);
     return ok;
+}
+
+bool net_scan_is_responsive(uint32_t timeout_ms)
+{
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) return false;
+    xSemaphoreGive(s_lock);
+    return true;
 }

@@ -38,6 +38,19 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # precise panic instead of another one of these to puzzle over.
 CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
 
+# --- Reliability: task watchdog actually reboots on trigger ---
+# CONFIG_ESP_TASK_WDT_EN/_INIT are already on by default (5s timeout,
+# watches both cores' idle tasks) -- but without _PANIC, a trigger only
+# prints a warning to the console and the device is left running (or
+# rather, stuck) exactly as it was. For a device meant to run unattended
+# for a long time, silently limping along is worse than a clean reboot.
+# See system_health.c/README for the fuller reliability story, including
+# why this alone does NOT catch every hang (it only sees a CPU core being
+# hogged, not two tasks deadlocked on each other's mutex while the CPU
+# sits idle) -- that gap is covered separately by system_health.c's own
+# bounded-wait lock probes.
+CONFIG_ESP_TASK_WDT_PANIC=y
+
 # --- LWIP ---
 # 16 wasn't enough once net_scan.c started opening several concurrent ping
 # sockets on top of the httpd server's own reserved sockets (~7) and AP/STA

@@ -114,8 +114,13 @@ static void worker_task(void *arg)
 /* Power-metering isn't time-critical (unlike on/off commands, which go
  * through the queue+worker_task path above and should feel instant) -- a
  * plain periodic poll loop is enough, and keeps it decoupled from the
- * action queue. */
-#define METRICS_POLL_INTERVAL_MS 15000
+ * action queue. Matches app.js's client-side auto-refresh interval (10s,
+ * see loadPlugs()'s setInterval in app.js) -- there's no manual "Оновити"
+ * button anymore, so the web UI only ever shows what this task last
+ * fetched; keeping the two periods equal means a refresh in the browser
+ * reliably picks up genuinely new numbers instead of the same stale
+ * reading it already had (which the old 15s/10s mismatch could produce). */
+#define METRICS_POLL_INTERVAL_MS 10000
 #define METRICS_POLL_TASK_STACK  12288  /* esp_http_client-calling task, see worker_task's comment */
 
 static void metrics_poll_task(void *arg)
@@ -489,4 +494,11 @@ esp_err_t plug_manager_update_settings(const system_settings_t *in)
 
     plug_manager_sync_all_from_inputs();
     return err;
+}
+
+bool plug_manager_is_responsive(uint32_t timeout_ms)
+{
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) return false;
+    xSemaphoreGive(s_lock);
+    return true;
 }

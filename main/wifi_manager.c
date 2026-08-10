@@ -67,7 +67,6 @@ static void wifi_scan_task(void *arg)
                 if (dup) continue;
 
                 snprintf(results[count].ssid, sizeof(results[count].ssid), "%s", ssid);
-                results[count].rssi = raw[i].rssi;
                 results[count].secure = raw[i].authmode != WIFI_AUTH_OPEN;
                 count++;
             }

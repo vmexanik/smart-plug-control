@@ -31,6 +31,15 @@ esp_err_t plug_manager_test_action(uint32_t id, bool on, char *detail, size_t de
 esp_err_t plug_manager_get_settings(system_settings_t *out);
 esp_err_t plug_manager_update_settings(const system_settings_t *in);
 
+/* Bounded-wait probe of the internal lock -- for system_health.c's deadlock
+ * detection ONLY, not a general-purpose accessor. Every other function
+ * above intentionally blocks forever (portMAX_DELAY) because a plug
+ * command must never be silently dropped; this one instead returns false
+ * if the lock isn't free within timeout_ms, which is itself the useful
+ * signal (something else is stuck holding it). On success the lock is
+ * acquired and immediately released -- nothing is read or changed. */
+bool plug_manager_is_responsive(uint32_t timeout_ms);
+
 #ifdef __cplusplus
 }
 #endif

@@ -55,8 +55,13 @@
   }
 
   /* ---------------- plugs ---------------- */
-  /* Every toggle/add/edit/delete, plus the 10s background refresh (for live
-   * power metrics), calls loadPlugs() again. Showing "завантаження…" and
+  /* No manual "Оновити" button -- refresh is purely automatic, on the 10s
+   * interval near the bottom of this file, which lines up with
+   * plug_manager.c's METRICS_POLL_INTERVAL_MS so a refresh always picks up
+   * genuinely new power/voltage/current readings rather than the same
+   * stale numbers the backend hasn't updated yet. Every toggle/add/edit/
+   * delete also calls loadPlugs() again for an immediate reflect of that
+   * one action. Showing "завантаження…" and
    * wiping the list on every single one of those made the whole card list
    * blank out and pop back for a moment each time -- visible as the cards
    * "blinking" on every action or every ~10s, not just on first page load.
@@ -297,7 +302,6 @@
 
   $('#btn-add-plug').addEventListener('click', () => openPlugModal(null));
   $('#btn-cancel-plug').addEventListener('click', closePlugModal);
-  $('#btn-refresh-plugs').addEventListener('click', loadPlugs);
   $('#btn-delete-plug').addEventListener('click', () => {
     const id = $('#pf-id').value;
     const name = $('#pf-name').value;
@@ -410,7 +414,7 @@
     tr.innerHTML = `
       <td>
         <div class="scan-name">${r.name ? escapeHtml(r.name) : '<span class="hint">без імені</span>'}</div>
-        <div class="scan-ip hint">${escapeHtml(r.ip)}${r.via_arp ? ' <span title="Не відповідає на ping — знайдено через ARP-кеш">(ARP)</span>' : ''}</div>
+        <div class="scan-ip hint">${escapeHtml(r.ip)}${r.ping_ok === false ? ' <span title="Пристрій на зв\'язку (ARP), але не відповідає на ping — типово для файрволу чи деяких IoT-прошивок">(без ping)</span>' : ''}</div>
       </td>
       <td>${typeCell}</td>
       <td>${r.http ? '<span class="pill on">так</span>' : '<span class="pill off">ні</span>'}</td>`;
@@ -494,12 +498,15 @@
     }
   }
 
-  /* Toggles "Почати пошук" vs "Завершити пошук" -- while a continuous scan
-   * is running there's nothing useful "start" would do (already-running
-   * 409), so it's disabled instead of just left clickable. */
+  /* While a continuous scan is running there's nothing useful "start" would
+   * do (already-running 409), so it's disabled instead of just left
+   * clickable; "Завершити пошук" is the mirror image -- only meaningful
+   * while something is actually running. "Закрити" is always enabled: it
+   * hides the modal regardless of scan state (and stops the scan too, see
+   * its own handler below). */
   function setScanRunningUi(running) {
     $('#btn-scan-go').disabled = running;
-    $('#btn-scan-close').textContent = running ? 'Завершити пошук' : 'Закрити';
+    $('#btn-scan-stop').disabled = !running;
   }
 
   $('#btn-scan-network').addEventListener('click', () => {
@@ -509,6 +516,18 @@
     scanModal.classList.remove('hidden');
   });
 
+  /* Stops the backend scan but leaves the modal open -- pollScanStatus()
+   * (already running on its 1s interval) picks up running:false on its own
+   * next tick and flips the buttons back via setScanRunningUi(false), so
+   * there's nothing else to do here. */
+  $('#btn-scan-stop').addEventListener('click', () => {
+    stopBackendScan();
+  });
+
+  /* Always closes the modal, regardless of whether a scan is running --
+   * stopBackendScan() is a no-op if nothing was running (see its own
+   * comment), so it's safe to call unconditionally rather than checking
+   * state first. */
   $('#btn-scan-close').addEventListener('click', () => {
     stopScanPoll();
     stopBackendScan();
@@ -543,12 +562,8 @@
   function renderWifiScanRow(n) {
     const tr = document.createElement('tr');
     tr.className = 'row-clickable';
-    /* Rough 4-bar signal indicator from RSSI (dBm, closer to 0 = stronger):
-     * these thresholds mirror what phones/routers commonly use. */
-    const bars = n.rssi >= -60 ? 4 : n.rssi >= -70 ? 3 : n.rssi >= -80 ? 2 : 1;
     tr.innerHTML = `
       <td>${escapeHtml(n.ssid)}</td>
-      <td title="${n.rssi} dBm">${'▮'.repeat(bars)}${'▯'.repeat(4 - bars)}</td>
       <td>${n.secure ? '' : '<span class="hint">відкрита</span>'}</td>`;
     tr.addEventListener('click', () => {
       stopWifiScanPoll();
@@ -614,14 +629,18 @@
   async function loadSettings() {
     try {
       const s = await api('/api/settings');
-      const tbody = $('#inputs-tbody');
-      tbody.innerHTML = '';
+      const list = $('#inputs-tbody');
+      list.innerHTML = '';
       s.inputs.forEach((inp, idx) => {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td><input type="checkbox" data-idx="${idx}" class="inp-enabled" ${inp.enabled ? 'checked' : ''}></td>
-          <td>${inp.label}</td>`;
-        tbody.appendChild(tr);
+        /* <label> wrapping both the checkbox and its text -- clicking
+         * anywhere on the row toggles it, same convention as the plug
+         * form's "Увімкнена" row (#pf-enabled-row). */
+        const row = document.createElement('label');
+        row.className = 'input-row';
+        row.innerHTML = `
+          <input type="checkbox" data-idx="${idx}" class="inp-enabled" ${inp.enabled ? 'checked' : ''}>
+          <span>${escapeHtml(inp.label)}</span>`;
+        list.appendChild(row);
       });
       $('#set-mqtt-uri').value = s.mqtt_uri;
       $('#set-mqtt-client-id').value = s.mqtt_client_id;

@@ -53,7 +53,6 @@ bool wifi_manager_sta_config_error(void);
 
 typedef struct {
     char ssid[33];
-    int8_t rssi;
     bool secure;   /* false = open network, no password needed */
 } wifi_scan_result_t;
 

@@ -53,6 +53,16 @@ static esp_err_t http_get(const char *url, char *body_out, size_t body_out_size,
         .timeout_ms = CONFIG_FINGERPRINT_HTTP_TIMEOUT_MS,
         .event_handler = http_event_handler,
         .user_data = &ctx,
+        /* Fingerprinting only cares whether THIS ip:80 itself answers like a
+         * Shelly/Tasmota -- not wherever a 3xx points to. Without this, a
+         * plain reverse-proxy/dev box (Traefik, nginx-proxy, etc.) on the
+         * scanned host redirects unknown paths like /shelly to its own
+         * vhost, esp_http_client happily follows, and the connect then
+         * fails trying to resolve that hostname (which typically only
+         * exists in the proxy's own local DNS/hosts, not on our LAN) --
+         * logged as a confusing esp-tls "couldn't get hostname" error that
+         * has nothing to do with the actual target device. */
+        .disable_auto_redirect = true,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) return ESP_FAIL;

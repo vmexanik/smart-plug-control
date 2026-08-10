@@ -14,11 +14,13 @@ idf_component_register(
         "time_sync.c"
         "net_scan.c"
         "fingerprint.c"
+        "system_health.c"
     INCLUDE_DIRS "."
     EMBED_FILES
         "web/index.html"
         "web/app.js"
         "web/style.css"
+        "web/favicon.svg"
     REQUIRES
         nvs_flash
         esp_wifi
@@ -33,5 +35,6 @@ idf_component_register(
         lwip
         esp_hw_support
         heap
+        esp_system
 )
 

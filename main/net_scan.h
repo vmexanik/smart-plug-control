@@ -14,26 +14,27 @@ extern "C" {
  *
  * This is intentionally NOT "auto-configure my smart plug" in the general
  * case -- there's no universal control protocol across plug firmwares. What
- * this module does: ping-sweep the STA subnet, flag hosts with TCP:80 open,
- * then run fingerprint.c's Shelly/Tasmota/ESPHome detection cascade against
- * each of those. When the cascade recognizes a family, the result comes
- * back with an on/off URL template already filled in; when it doesn't, the
- * web UI still lets the user pick the bare IP and fill the form in by hand
- * (unchanged fallback behavior).
+ * this module does: actively trigger ARP resolution across the STA subnet
+ * (a host answering ARP is the closest thing to a universal "is anything
+ * here at all" signal a LAN has -- see net_scan.c's ARP_PROBE_* constants
+ * for why this is the *primary* discovery step, not ICMP ping), confirm
+ * each ARP-found host with a single ping (informational only) and a
+ * TCP:80 probe, then run fingerprint.c's Shelly/Tasmota/ESPHome detection
+ * cascade against the ones with :80 open. When the cascade recognizes a
+ * family, the result comes back with an on/off URL template already
+ * filled in; when it doesn't, the web UI still lets the user pick the bare
+ * IP and fill the form in by hand (unchanged fallback behavior).
  *
  * Scope/limits (see README "Автопошук у мережі" for the full list,
  * including what was intentionally left out of the uploaded discovery
  * spec this was adapted from -- mDNS [later added anyway, see the
- * reverse-DNS section below], ESPHome's native binary API, Sonoff DIY).
- * Passive ARP-cache reading (not raw ARP packet capture) was added later
- * too, as a fallback for hosts that answer ARP but silently drop ICMP/TCP
- * -- see arp_dump_snapshot() in net_scan.c:
+ * reverse-DNS section below], ESPHome's native binary API, Sonoff DIY):
  *  - Only sweeps the STA interface's subnet (capped to a /24-sized window).
  *    Devices on the fallback AP's 192.168.4.0/24, or on a different VLAN/
  *    subnet than the hub, will not be found.
- *  - A "responds to ping" host is not necessarily a smart plug -- phones,
- *    laptops, routers etc. will show up too; fingerprinting narrows that
- *    down further but "family unknown" hosts are still listed as bare IPs.
+ *  - Answering ARP is not necessarily a smart plug -- phones, laptops,
+ *    routers etc. will show up too; fingerprinting narrows that down
+ *    further but "family unknown" hosts are still listed as bare IPs.
  *  - Fingerprinting assumes a single/first channel (Shelly id=0, Tasmota
  *    relay 1) -- multi-channel strips are detected as PLUG_KIND_RELAY and
  *    the URL template still points at the first channel; adjust manually
@@ -46,16 +47,16 @@ typedef struct {
     char ip[16];      /* dotted-quad */
     bool http_open;   /* quick TCP:80 connect succeeded -- hint only */
 
-    /* True if this host was found only through lwIP's ARP cache (it never
-     * answered a ping/TCP:80 probe of ours) -- see net_scan.c's
-     * arp_dump_snapshot() for why this exists: a host can drop ICMP echo
-     * and refuse TCP:80 outright (default Windows Firewall, and no small
-     * amount of IoT firmware) while its NIC still has to answer ARP for
-     * basic L2 connectivity to work at all. http_open may still be true
-     * here too (the TCP:80 probe is still attempted for ARP-only finds,
-     * same as any other host) -- this flag only says *how* the host was
-     * first noticed, not what it can do. */
-    bool via_arp;
+    /* Every result in this list was found via ARP (see net_scan.c's
+     * ARP_PROBE_* constants -- that's now the primary, sole discovery
+     * gate). This flag instead says whether the host *also* answered a
+     * follow-up ICMP ping -- purely informational: a host can answer ARP
+     * (has no choice, or nothing on the LAN works at all) while still
+     * dropping ICMP echo outright (default Windows Firewall, and no small
+     * amount of IoT firmware). false here does not mean the host is any
+     * less real or any less findable -- it's already in this list either
+     * way. */
+    bool ping_ok;
 
     /* Best-effort reverse-DNS (PTR) hostname, resolved against the STA's
      * DNS server (normally the router). Empty string if the router didn't
@@ -102,13 +103,13 @@ typedef struct {
  * spawned until net_scan_start()). */
 esp_err_t net_scan_init(void);
 
-/* Kicks off a *continuous* ping sweep of the STA subnet in a dedicated task:
- * it repeats the full sweep pass after pass, forever, only stopping when
- * net_scan_stop() is called (or an internal safety cap is hit -- see
+/* Kicks off a *continuous* ARP-probe sweep of the STA subnet in a dedicated
+ * task: it repeats the full sweep pass after pass, forever, only stopping
+ * when net_scan_stop() is called (or an internal safety cap is hit -- see
  * SCAN_MAX_RUNTIME_MS in net_scan.c, in case a caller forgets to stop it,
  * e.g. the browser tab closes mid-scan). This is intentional: a single
  * pass can miss a device for all sorts of transient reasons (it was still
- * booting, one ping packet got dropped over Wi-Fi, ARP hadn't resolved
+ * booting, one probe packet got dropped over Wi-Fi, ARP hadn't resolved
  * yet) and previously required the user to notice and click "start" again.
  * Looping fixes that without any extra logic on the caller's side -- a
  * device that didn't answer this pass very likely will in the next one a
@@ -128,7 +129,7 @@ esp_err_t net_scan_init(void);
 esp_err_t net_scan_start(void);
 
 /* Requests the running continuous scan to stop. Takes effect within one
- * ping batch (a fraction of a second), not instantly and not necessarily
+ * probe batch (a fraction of a second), not instantly and not necessarily
  * before this call returns -- poll net_scan_get_summary().running to know
  * when it's actually finished. Safe to call when nothing is running
  * (returns ESP_ERR_INVALID_STATE, not an error worth surfacing to the
@@ -141,6 +142,12 @@ void net_scan_get_summary(net_scan_summary_t *out);
 /* Copies results[index] into *out. Returns false (*out left untouched) if
  * index >= the result_count reported by net_scan_get_summary(). */
 bool net_scan_get_result(size_t index, net_scan_result_t *out);
+
+/* Bounded-wait probe of the internal lock -- same purpose and same caveat
+ * as plug_manager_is_responsive(): for system_health.c's deadlock
+ * detection only, not a general accessor. Returns false if the lock
+ * couldn't be acquired within timeout_ms. */
+bool net_scan_is_responsive(uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }

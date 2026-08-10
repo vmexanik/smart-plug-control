@@ -14,6 +14,7 @@
 #include "web_server.h"
 #include "time_sync.h"
 #include "net_scan.h"
+#include "system_health.h"
 
 static const char *TAG = "app_main";
 
@@ -51,6 +52,15 @@ void app_main(void)
     ESP_ERROR_CHECK(net_scan_init());
 
     ESP_ERROR_CHECK(web_server_start());
+
+    /* Background reliability watchdog -- deadlock/Wi-Fi-stuck detection and
+     * a periodic forensic heartbeat, see system_health.h for the full
+     * rationale. Not treated as fatal if it fails to start (unlikely --
+     * it's a tiny task): losing this safety net shouldn't take down a
+     * device that's otherwise working. */
+    if (system_health_init() != ESP_OK) {
+        ESP_LOGW(TAG, "could not start system_health task, running without the reliability watchdog");
+    }
 
     /* Give the input poller a couple of sample cycles to establish stable
      * levels, then push the current physical input state to bound plugs. */

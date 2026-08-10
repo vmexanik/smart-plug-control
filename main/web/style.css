@@ -293,6 +293,28 @@ tr:last-child td { border-bottom: none; }
   .device-action { grid-area: action; }
 }
 
+/* ---------------- inputs settings (divs) ---------------- */
+
+.inputs-list {
+  border: 1px solid var(--bs-border-color);
+  border-radius: var(--bs-border-radius-lg);
+  box-shadow: var(--bs-box-shadow);
+  background: var(--bs-card-bg);
+  overflow: hidden;
+}
+
+.input-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--bs-border-color);
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+.inputs-list > .input-row:last-child { border-bottom: none; }
+.input-row:hover { background: rgba(13, 110, 253, 0.04); }
+
 /* ---------------- event log (divs) ---------------- */
 
 .log-list {
