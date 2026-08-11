@@ -23,14 +23,38 @@ static char s_sta_ssid[33] = {0};
 static char s_sta_pass[65] = {0};
 
 /* After this many consecutive disconnects with a "this won't fix itself by
- * retrying" reason (wrong password, SSID not found, ...), stop auto-
- * reconnecting and let the UI surface it instead of retrying forever. A
- * transient disconnect (AP reboot, roaming, momentary RF noise) does NOT
- * count against this -- those reasons fall through to the unlimited-retry
- * branch below, same as before. */
+ * retrying" reason, stop auto-reconnecting and let the UI surface it instead
+ * of retrying forever. A transient disconnect (AP reboot, roaming, momentary
+ * RF noise) does NOT count against this -- those reasons fall through to the
+ * unlimited-retry branch below.
+ *
+ * What counts as "won't fix itself" is split into two very different cases
+ * (see is_hard_auth_failure_reason()/is_ap_not_found_reason() below):
+ *
+ *  - A real handshake/auth failure (wrong PSK, MIC failure, ...) can only
+ *    happen after the AP was actually found and we tried to authenticate
+ *    against it -- there's no ambiguity, it's a credentials problem.
+ *
+ *  - WIFI_REASON_NO_AP_FOUND is NOT unambiguous the same way: the exact same
+ *    reason code fires both for "SSID doesn't exist / typo" (permanent) and
+ *    for "this AP we've connected to plenty of times just isn't answering
+ *    right now" (router reboot, brief outage, momentary RF dead zone --
+ *    entirely transient). Treating both as "give up after 3 tries" (the
+ *    original behavior here) meant a device that had been happily connected
+ *    for days would permanently stop reconnecting within ~10 seconds of its
+ *    AP going through a routine reboot, and never come back on its own --
+ *    exactly the opposite of what a "normal" IoT device does. s_sta_ever_
+ *    connected below is what breaks the ambiguity: if these credentials
+ *    have ever actually gotten an IP before, NO_AP_FOUND after that point is
+ *    overwhelmingly more likely to be "AP temporarily gone" than "someone
+ *    edited the SSID to a typo mid-flight" -- so retry it forever, same as
+ *    any other transient reason. Only apply the give-up guard to NO_AP_FOUND
+ *    when these credentials have NEVER worked even once, which is exactly
+ *    the initial-setup-typo case it was meant to catch in the first place. */
 #define STA_CONFIG_ERROR_MAX_RETRIES 3
 static int s_config_error_count = 0;
 static volatile bool s_sta_gave_up = false;
+static volatile bool s_sta_ever_connected = false;
 
 #define WIFI_SCAN_TASK_STACK 4096
 
@@ -133,7 +157,9 @@ bool wifi_manager_get_scan_result(size_t index, wifi_scan_result_t *out)
     return ok;
 }
 
-static bool is_config_error_reason(uint8_t reason)
+/* Unambiguous credentials/auth problem -- can only happen after the AP was
+ * actually found and we tried (and failed) to authenticate against it. */
+static bool is_hard_auth_failure_reason(uint8_t reason)
 {
     switch (reason) {
         case WIFI_REASON_AUTH_EXPIRE:
@@ -142,7 +168,19 @@ static bool is_config_error_reason(uint8_t reason)
         case WIFI_REASON_802_1X_AUTH_FAILED:
         case WIFI_REASON_AUTH_FAIL:            /* the classic "wrong PSK" reason */
         case WIFI_REASON_HANDSHAKE_TIMEOUT:
-        case WIFI_REASON_NO_AP_FOUND:          /* SSID typo / AP not in range */
+            return true;
+        default:
+            return false;
+    }
+}
+
+/* Ambiguous: fires both for a genuine SSID typo (permanent) and for "this
+ * previously-working AP just isn't there right now" (transient). See the
+ * big comment above s_sta_ever_connected for how the two get told apart. */
+static bool is_ap_not_found_reason(uint8_t reason)
+{
+    switch (reason) {
+        case WIFI_REASON_NO_AP_FOUND:
         case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
         case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD:
         case WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD:
@@ -164,23 +202,36 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
             return;
         }
         wifi_event_sta_disconnected_t *evt = (wifi_event_sta_disconnected_t *)data;
-        if (evt && is_config_error_reason(evt->reason)) {
+        uint8_t reason = evt ? evt->reason : 0;
+        /* Hard auth failure: always subject to the give-up guard, regardless
+         * of connection history -- a password that suddenly stops working
+         * (e.g. someone changed it on the router) is worth surfacing, not
+         * retrying forever. NO_AP_FOUND: only subject to the guard if these
+         * credentials have never actually worked; once they have, treat it
+         * exactly like any other transient disconnect (see the big comment
+         * above s_sta_ever_connected). */
+        bool subject_to_give_up_guard = evt &&
+            (is_hard_auth_failure_reason(reason) ||
+             (is_ap_not_found_reason(reason) && !s_sta_ever_connected));
+
+        if (subject_to_give_up_guard) {
             s_config_error_count++;
             ESP_LOGW(TAG, "STA disconnected (reason %u), спроба %d/%d",
-                     (unsigned)evt->reason, s_config_error_count, STA_CONFIG_ERROR_MAX_RETRIES);
+                     (unsigned)reason, s_config_error_count, STA_CONFIG_ERROR_MAX_RETRIES);
             if (s_config_error_count >= STA_CONFIG_ERROR_MAX_RETRIES) {
                 s_sta_gave_up = true;
                 ESP_LOGE(TAG, "STA: вичерпано спроби підключення -- перевірте SSID/пароль");
                 return;
             }
         } else {
-            ESP_LOGW(TAG, "STA disconnected, retrying");
+            ESP_LOGW(TAG, "STA disconnected (reason %u), retrying", (unsigned)reason);
         }
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *evt = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "STA got IP: " IPSTR, IP2STR(&evt->ip_info.ip));
         s_sta_connected = true;
+        s_sta_ever_connected = true;
         s_config_error_count = 0;
         s_sta_gave_up = false;
     }
@@ -286,9 +337,13 @@ esp_err_t wifi_manager_set_credentials(const char *ssid, const char *password)
     esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
 
     /* New credentials deserve a fresh set of retry attempts, even if the
-     * previous ones had already been given up on. */
+     * previous ones had already been given up on -- including resetting
+     * s_sta_ever_connected, since a NO_AP_FOUND against these brand new
+     * credentials should still be treated as "maybe a typo" (subject to the
+     * give-up guard) rather than assumed transient. */
     s_config_error_count = 0;
     s_sta_gave_up = false;
+    s_sta_ever_connected = false;
     s_sta_connected = false;
     esp_wifi_disconnect();
     esp_wifi_connect();

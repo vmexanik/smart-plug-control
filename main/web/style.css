@@ -370,6 +370,8 @@ tr:last-child td { border-bottom: none; }
   overflow-wrap: anywhere;
 }
 
+.hint.bad { color: var(--bs-red); }
+
 h2 {
   font-size: 1.05rem;
   font-weight: 600;
@@ -458,6 +460,37 @@ input[type=checkbox] { accent-color: var(--bs-blue); }
   margin-bottom: 0.625rem;
   overflow-wrap: anywhere;
 }
+
+/* ---------------- toast ---------------- */
+
+.toast-stack {
+  position: fixed;
+  left: 50%;
+  bottom: 1rem;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  z-index: 1100; /* above .modal (1050) so a toggle error is visible even with the edit form open */
+  pointer-events: none;
+  max-width: calc(100vw - 1.5rem);
+}
+
+.toast {
+  background: #212529;
+  color: #fff;
+  padding: 0.55rem 1rem;
+  border-radius: var(--bs-border-radius);
+  box-shadow: var(--bs-box-shadow-lg);
+  font-size: 0.875rem;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  opacity: 1;
+  transition: opacity 0.5s ease;
+}
+.toast-error { background: var(--bs-red-dark, #b02a37); }
+.toast-out { opacity: 0; }
 
 /* ---------------- modal ---------------- */
 

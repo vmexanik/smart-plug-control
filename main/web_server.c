@@ -210,6 +210,7 @@ static cJSON *plug_to_json(const plug_t *p)
     cJSON_AddBoolToObject(o, "last_state", p->last_state);
     cJSON_AddBoolToObject(o, "last_cmd_ok", p->last_cmd_ok);
     cJSON_AddNumberToObject(o, "last_change_us", (double)p->last_change_us);
+    cJSON_AddBoolToObject(o, "reachable", p->reachable);
 
     cJSON *metrics = cJSON_CreateObject();
     cJSON_AddBoolToObject(metrics, "valid", p->metrics.valid);

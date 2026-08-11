@@ -126,6 +126,23 @@ typedef struct {
     int64_t last_change_us;
     plug_metrics_t metrics;         /* last successful power-metering reading */
     int64_t metrics_updated_us;     /* 0 = never successfully polled */
+
+    /* Best-effort "is this device currently answering" flag, kept up to date
+     * by plug_manager.c's metrics_poll_task (every METRICS_POLL_INTERVAL_MS)
+     * and by do_dispatch() after every actual on/off attempt -- but ONLY for
+     * DRIVER_HTTP plugs with a fingerprint-recognized family, i.e. the exact
+     * same subset metrics_poll_task already polls in the background (see its
+     * comment in plug_manager.c). That background poll is what guarantees
+     * this flag eventually flips back to true once the device comes back,
+     * even if nobody happens to click its toggle again -- a manual/
+     * unrecognized-family HTTP plug has no such background poll, so it's
+     * deliberately left out of this tracking and always stays true (nothing
+     * would ever clear a false back to true for it). Defaults to true
+     * (optimistic: "no reason yet to think it's offline"), same philosophy
+     * as last_cmd_ok. Used to grey out the web UI's toggle button and skip
+     * do_dispatch()'s network call (and its multi-second timeout) instead of
+     * piling up doomed requests when the device is known to be offline. */
+    bool reachable;
 } plug_t;
 
 typedef struct {

@@ -40,8 +40,12 @@ void wifi_manager_get_status(char *sta_ip_out, size_t sta_ip_size,
 void wifi_manager_get_sta_password(char *pass_out, size_t pass_size);
 
 /* True once STA has failed to associate 3 times in a row for a reason that
- * retrying won't fix on its own (wrong password, SSID not found, ...) --
- * see wifi_manager.c's is_config_error_reason() for the exact reason codes.
+ * retrying won't fix on its own -- either a real auth/handshake failure, or
+ * (only if these credentials have never once actually connected) "AP not
+ * found". A previously-working AP that temporarily disappears does NOT set
+ * this -- it retries forever instead, same as any normal device reconnecting
+ * after its router reboots. See wifi_manager.c's is_hard_auth_failure_reason()
+ * / is_ap_not_found_reason() / s_sta_ever_connected for the exact logic.
  * Automatic reconnection stops once this is true, so the device doesn't
  * spam association attempts against an AP that keeps rejecting it; it
  * resets on the next wifi_manager_set_credentials() call or reboot. Purely

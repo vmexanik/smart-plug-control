@@ -17,6 +17,27 @@
     return data;
   }
 
+  /* ---------------- toast ---------------- */
+  /* Small, non-blocking, auto-dismissing notice -- used instead of alert()
+   * for the plug on/off toggle specifically: alert() is a modal dialog that
+   * steals focus and has to be dismissed by hand, and mashing an
+   * unresponsive plug's toggle a few times in a row used to queue up one of
+   * these per click, which is exactly the kind of "clicked 3 times, now
+   * dismissing 3 popups" annoyance this replaces. Errors that are genuinely
+   * rare/one-off (deleting a plug, clearing the log) still use confirm()/
+   * alert() as before -- this is specifically for a button the user might
+   * reasonably click several times in a row. */
+  function toast(msg, isError) {
+    const stack = $('#toast-stack');
+    if (!stack) return;
+    const el = document.createElement('div');
+    el.className = 'toast' + (isError ? ' toast-error' : '');
+    el.textContent = msg;
+    stack.appendChild(el);
+    setTimeout(() => el.classList.add('toast-out'), 2600);
+    setTimeout(() => el.remove(), 3200);
+  }
+
   /* ---------------- tabs ---------------- */
   $$('.tab-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -109,13 +130,25 @@
       metricsHtml = `<div class="device-metrics">${parts.join(' · ')}</div>`;
     }
 
+    /* p.reachable is only ever false for HTTP plugs with a recognized family
+     * (see app_types.h's doc comment on plug_t.reachable) -- the backend
+     * itself keeps this passively up to date via the same 10s metrics poll
+     * that refreshes power readings, so a plug that comes back online
+     * clears this within 10s without needing anyone to click anything.
+     * Greying out the toggle here is what stops a dead plug's button from
+     * being mashed in the first place -- the backend also fast-fails the
+     * same case (see plug_manager.c's do_dispatch()), this is just the UI
+     * half of it. */
+    const offline = p.reachable === false;
+
     card.innerHTML = `
-      <div class="device-name">${escapeHtml(p.name)}${p.enabled ? '' : ' <span class="hint">(вимкнена)</span>'}${metricsHtml}</div>
+      <div class="device-name">${escapeHtml(p.name)}${p.enabled ? '' : ' <span class="hint">(вимкнена)</span>'}${offline ? ' <span class="hint bad">(не на зв\'язку)</span>' : ''}${metricsHtml}</div>
       <div class="device-input">${p.input === 'NONE' ? '<span class="hint">без входу</span>' : p.input}</div>
       <div class="device-state">${statePill}</div>
       <div class="device-action">
         <button type="button" class="device-action-btn ${p.last_state ? 'state-on' : 'state-off'}" data-act="toggle"
-                title="${p.last_state ? 'Вимкнути' : 'Увімкнути'}" aria-label="Перемкнути ${escapeHtml(p.name)}">
+                ${offline ? 'disabled' : ''}
+                title="${offline ? 'Розетка не на зв\'язку' : (p.last_state ? 'Вимкнути' : 'Увімкнути')}" aria-label="Перемкнути ${escapeHtml(p.name)}">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 2v10"/>
             <path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>
@@ -123,22 +156,52 @@
         </button>
       </div>`;
 
-    card.addEventListener('click', () => openPlugModal(p));
-    card.querySelector('[data-act="toggle"]').addEventListener('click', (ev) => {
+    /* A disabled <button> has pointer-events:none (see the global
+     * "button:disabled" rule in style.css), which means it doesn't receive
+     * the click at all -- the browser hit-tests straight through it to
+     * whatever's underneath, which here is .device-action, and the event
+     * bubbles up from there instead. Without this guard that click would
+     * reach the card's own listener below and pop open the edit modal
+     * every time someone taps a greyed-out (offline) toggle -- checking
+     * for .device-action here (rather than the button itself, which won't
+     * be ev.target in the disabled case) covers both the enabled button
+     * (whose own listener already stopPropagation()s, so this is a no-op
+     * for it) and the disabled one (where this is the only thing that
+     * stops the modal from opening). */
+    card.addEventListener('click', (ev) => {
+      if (ev.target.closest('.device-action')) return;
+      openPlugModal(p);
+    });
+    const btn = card.querySelector('[data-act="toggle"]');
+    btn.addEventListener('click', (ev) => {
       ev.stopPropagation();
-      testPlug(p.id, !p.last_state);
+      testPlug(p.id, !p.last_state, p.name, btn);
     });
 
     return card;
   }
 
-  async function testPlug(id, on) {
+  /* Tracks plugs with a request currently in flight so a second click before
+   * the first one's response comes back is simply ignored rather than
+   * firing another request on top of it -- belt-and-suspenders alongside
+   * disabling the button itself (which loadPlugs()'s upcoming re-render
+   * will always eventually reset, so this covers the brief window between
+   * click and that re-render too). */
+  const pendingToggles = new Set();
+
+  async function testPlug(id, on, name, btn) {
+    if (pendingToggles.has(id)) return;
+    pendingToggles.add(id);
+    if (btn) btn.disabled = true;
     try {
       const r = await api(`/api/plugs/${id}/action`, { method: 'POST', body: JSON.stringify({ action: on ? 'on' : 'off' }) });
-      if (!r.ok) alert('Команда не виконана: ' + r.detail);
+      if (!r.ok) toast(`"${name}": ${r.detail}`, true);
       await loadPlugs();
     } catch (e) {
-      alert('Помилка: ' + e.message);
+      toast(`"${name}": ${e.message}`, true);
+    } finally {
+      pendingToggles.delete(id);
+      if (btn) btn.disabled = false; /* harmless no-op if loadPlugs() already replaced this node */
     }
   }
 

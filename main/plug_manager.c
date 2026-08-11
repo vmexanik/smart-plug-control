@@ -50,8 +50,26 @@ static esp_err_t do_dispatch(plug_t snapshot, bool on, const char *source,
     char detail[96] = {0};
     esp_err_t err;
 
+    /* See app_types.h's doc comment on plug_t.reachable: this flag is only
+     * ever set false for the subset metrics_poll_task actively polls in the
+     * background (HTTP + recognized family), which is exactly what
+     * guarantees it un-sticks on its own once the device answers again --
+     * so it's safe to hard-skip the network call here instead of blocking
+     * whichever task called us (the single httpd worker, for a manual web
+     * click; worker_task, for an input-triggered one) on a doomed multi-
+     * second esp_http_client timeout. Without this, mashing a dead plug's
+     * toggle a few times in a row queues up that many multi-second waits
+     * back to back on the httpd's one worker task, stalling every other
+     * request (including totally unrelated ones) until they all time out. */
+    bool skip_unreachable = (snapshot.driver == DRIVER_HTTP &&
+                              snapshot.http.family != PLUG_FAMILY_UNKNOWN &&
+                              !snapshot.reachable);
+
     if (!snapshot.enabled) {
         snprintf(detail, sizeof(detail), "plug disabled");
+        err = ESP_ERR_INVALID_STATE;
+    } else if (skip_unreachable) {
+        snprintf(detail, sizeof(detail), "plug not reachable (offline)");
         err = ESP_ERR_INVALID_STATE;
     } else {
         switch (snapshot.driver) {
@@ -73,12 +91,23 @@ static esp_err_t do_dispatch(plug_t snapshot, bool on, const char *source,
 
     bool ok = (err == ESP_OK);
 
+    /* Only overwrite ->reachable when this call actually attempted a
+     * network round-trip to the device -- not when the plug is simply
+     * disabled (unrelated to whether it's online), and not when
+     * skip_unreachable already short-circuited above (nothing new was
+     * learned, leave the existing false as-is rather than re-write it). */
+    bool tracks_reachable = (snapshot.driver == DRIVER_HTTP && snapshot.http.family != PLUG_FAMILY_UNKNOWN);
+    bool attempted_network_call = snapshot.enabled && !skip_unreachable;
+
     xSemaphoreTake(s_lock, portMAX_DELAY);
     int idx = find_index_locked(snapshot.id);
     if (idx >= 0) {
         s_cfg.plugs[idx].last_state = on;
         s_cfg.plugs[idx].last_cmd_ok = ok;
         s_cfg.plugs[idx].last_change_us = esp_timer_get_time();
+        if (tracks_reachable && attempted_network_call) {
+            s_cfg.plugs[idx].reachable = ok;
+        }
     }
     xSemaphoreGive(s_lock);
 
@@ -153,17 +182,24 @@ static void metrics_poll_task(void *arg)
 
         for (size_t i = 0; i < n; i++) {
             plug_metrics_t m;
-            if (driver_http_get_metrics(&snapshot[i], &m) != ESP_OK) {
-                /* Network error / bad response -- leave the previous reading
-                 * (and its timestamp) as-is rather than blanking the UI over
-                 * one dropped poll. */
-                continue;
-            }
+            bool answered = (driver_http_get_metrics(&snapshot[i], &m) == ESP_OK);
+
             xSemaphoreTake(s_lock, portMAX_DELAY);
             int idx = find_index_locked(snapshot[i].id);
             if (idx >= 0) {
-                s_cfg.plugs[idx].metrics = m;
-                s_cfg.plugs[idx].metrics_updated_us = esp_timer_get_time();
+                /* This is the background signal do_dispatch() relies on to
+                 * un-stick plug_t.reachable on its own once a plug comes back
+                 * online (see its doc comment in app_types.h) -- update it
+                 * every poll, success or failure, independent of the metrics
+                 * reading itself. */
+                s_cfg.plugs[idx].reachable = answered;
+                if (answered) {
+                    s_cfg.plugs[idx].metrics = m;
+                    s_cfg.plugs[idx].metrics_updated_us = esp_timer_get_time();
+                }
+                /* else: network error / bad response -- leave the previous
+                 * metrics reading (and its timestamp) as-is rather than
+                 * blanking the UI over one dropped poll. */
             }
             xSemaphoreGive(s_lock);
         }
@@ -271,6 +307,7 @@ esp_err_t plug_manager_init(const app_config_t *initial_cfg)
         s_cfg.plugs[i].last_change_us = 0;
         memset(&s_cfg.plugs[i].metrics, 0, sizeof(s_cfg.plugs[i].metrics));
         s_cfg.plugs[i].metrics_updated_us = 0;
+        s_cfg.plugs[i].reachable = true; /* optimistic until the first poll/command says otherwise */
     }
     s_next_id = max_id + 1;
 
@@ -398,6 +435,13 @@ esp_err_t plug_manager_add(plug_t *in_out)
     in_out->last_state = got_status ? initial_on : false;
     in_out->last_cmd_ok = true; /* either genuinely confirmed, or "no info yet", not a failure */
     in_out->last_change_us = esp_timer_get_time();
+    /* Reflect the query attempt just above for tracked plugs (see
+     * app_types.h's doc comment on ->reachable) -- an untracked plug
+     * (manual/unrecognized-family HTTP, MQTT, Zigbee) always starts
+     * optimistic since nothing will ever probe it in the background. */
+    in_out->reachable = (in_out->driver == DRIVER_HTTP && in_out->http.family != PLUG_FAMILY_UNKNOWN)
+                             ? got_status
+                             : true;
     s_cfg.plugs[s_cfg.plug_count] = *in_out;
     s_cfg.plug_count++;
     esp_err_t err = save_locked();
@@ -422,6 +466,7 @@ esp_err_t plug_manager_update(uint32_t id, const plug_t *in)
     updated.last_change_us = s_cfg.plugs[idx].last_change_us;
     updated.metrics = s_cfg.plugs[idx].metrics;
     updated.metrics_updated_us = s_cfg.plugs[idx].metrics_updated_us;
+    updated.reachable = s_cfg.plugs[idx].reachable;
     s_cfg.plugs[idx] = updated;
     esp_err_t err = save_locked();
     xSemaphoreGive(s_lock);
