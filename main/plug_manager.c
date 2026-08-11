@@ -181,8 +181,35 @@ static void metrics_poll_task(void *arg)
         xSemaphoreGive(s_lock);
 
         for (size_t i = 0; i < n; i++) {
+            bool was_reachable = snapshot[i].reachable;
+
             plug_metrics_t m;
-            bool answered = (driver_http_get_metrics(&snapshot[i], &m) == ESP_OK);
+            bool metrics_ok = (driver_http_get_metrics(&snapshot[i], &m) == ESP_OK);
+
+            /* Query actual on/off state every single cycle, not just metrics
+             * -- a plug can change state without us ever sending a command
+             * (its own physical button, another controller, a power cycle
+             * defaulting to a particular relay state...), and metrics alone
+             * (power/voltage/current) say nothing about on/off. last_state
+             * is otherwise only ever touched by do_dispatch() (a command we
+             * ourselves sent), so without this the ON/OFF pill could sit
+             * showing stale state indefinitely even while the wattage
+             * reading right next to it keeps updating normally every 10s --
+             * confusing on its own (numbers changing, on/off pill frozen).
+             * Same family restriction as driver_http_get_metrics(). For
+             * Shelly Gen2 this happens to hit the exact same URL metrics
+             * just used (both are /rpc/Switch.GetStatus) -- duplicating
+             * that request instead of sharing the one response is wasteful,
+             * but simple/uniform across all three families beats an early
+             * optimization for what's still just one extra small LAN GET
+             * per plug per 10s. */
+            bool cur_on = false;
+            bool status_ok = (driver_http_get_status(&snapshot[i], &cur_on) == ESP_OK);
+
+            /* Reachable if EITHER query got through -- both talk to the
+             * same device over the same kind of API, so either succeeding
+             * is equally good evidence it's alive. */
+            bool answered = metrics_ok || status_ok;
 
             xSemaphoreTake(s_lock, portMAX_DELAY);
             int idx = find_index_locked(snapshot[i].id);
@@ -193,15 +220,36 @@ static void metrics_poll_task(void *arg)
                  * every poll, success or failure, independent of the metrics
                  * reading itself. */
                 s_cfg.plugs[idx].reachable = answered;
-                if (answered) {
+                if (metrics_ok) {
                     s_cfg.plugs[idx].metrics = m;
                     s_cfg.plugs[idx].metrics_updated_us = esp_timer_get_time();
                 }
                 /* else: network error / bad response -- leave the previous
                  * metrics reading (and its timestamp) as-is rather than
                  * blanking the UI over one dropped poll. */
+                if (status_ok) {
+                    /* Only bump last_change_us on a genuine transition (or
+                     * recovering from a failed last_cmd_ok) -- otherwise
+                     * every routine 10s re-check would stamp "just changed"
+                     * on a relay that's been sitting in the same state for
+                     * days. */
+                    bool changed = (s_cfg.plugs[idx].last_state != cur_on) || !s_cfg.plugs[idx].last_cmd_ok;
+                    s_cfg.plugs[idx].last_state = cur_on;
+                    s_cfg.plugs[idx].last_cmd_ok = true;
+                    if (changed) s_cfg.plugs[idx].last_change_us = esp_timer_get_time();
+                }
             }
             xSemaphoreGive(s_lock);
+
+            /* Worth a dedicated log line specifically for "came back after
+             * being offline" (see plug_t.reachable's doc comment) -- routine
+             * every-10s re-checks are deliberately NOT logged individually,
+             * that would flood the event log with one entry per plug every
+             * poll for no informational gain. */
+            if (status_ok && !was_reachable) {
+                event_log_append(LOG_SRC_SYSTEM, snapshot[i].name, cur_on ? "on" : "off", true,
+                                  "reconnected, state re-checked");
+            }
         }
     }
 }
