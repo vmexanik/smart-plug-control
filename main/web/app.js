@@ -63,7 +63,7 @@
         .filter(i => i.enabled)
         .map(i => `${i.label}=${i.level ? 1 : 0}`)
         .join(', ') || 'немає активних входів';
-      $('#status-bar').innerHTML = `${wifiTxt} · AP: ${s.wifi.ap_ip} · Входи: ${inputsTxt} · uptime ${formatUptime(s.uptime_s)}`;
+      $('#status-bar').innerHTML = `${wifiTxt} <br> AP: ${s.wifi.ap_ip} <br> Входи: ${inputsTxt} <br> uptime ${formatUptime(s.uptime_s)}`;
     } catch (e) {
       $('#status-bar').innerHTML = `<span class="bad">Помилка статусу: ${e.message}</span>`;
     }
@@ -141,14 +141,37 @@
      * half of it. */
     const offline = p.reachable === false;
 
+    /* A plug bound to a physical input (AC1/DC1/DC2) is driven exclusively
+     * by that input (plug_manager_on_input_change()) -- the backend itself
+     * now refuses a manual command for it (plug_manager_test_action(), see
+     * app_types.h/plug_manager.c) precisely because letting both the input
+     * AND a manual click drive the same relay is a race with no single
+     * source of truth (whichever fires last/next wins, unpredictably).
+     *
+     * This is only a *soft* block in the UI (a CSS class, not the `disabled`
+     * attribute): a real `disabled` button never dispatches a click event at
+     * all, so the backend's specific rejection reason (a Ukrainian sentence
+     * meant to actually be read, see plug_manager_test_action()) would never
+     * reach testPlug() and its toast() call -- the user would just see a
+     * greyed-out button with nothing happening, and on a touch screen there's
+     * no hover to even reveal the `title` tooltip as a fallback. Letting the
+     * click through, hitting the backend, and surfacing its detail message
+     * via toast is strictly more informative, for both the trigger-controlled
+     * and offline cases. */
+    const triggerControlled = p.input !== 'NONE';
+    const toggleDisabled = offline || triggerControlled;
+    let toggleTitle;
+    if (triggerControlled) toggleTitle = `Керується входом ${p.input}, вручну не перемикається`;
+    else if (offline) toggleTitle = 'Розетка не на зв\'язку';
+    else toggleTitle = p.last_state ? 'Вимкнути' : 'Увімкнути';
+
     card.innerHTML = `
       <div class="device-name">${escapeHtml(p.name)}${p.enabled ? '' : ' <span class="hint">(вимкнена)</span>'}${offline ? ' <span class="hint bad">(не на зв\'язку)</span>' : ''}${metricsHtml}</div>
       <div class="device-input">${p.input === 'NONE' ? '<span class="hint">без входу</span>' : p.input}</div>
       <div class="device-state">${statePill}</div>
       <div class="device-action">
-        <button type="button" class="device-action-btn ${p.last_state ? 'state-on' : 'state-off'}" data-act="toggle"
-                ${offline ? 'disabled' : ''}
-                title="${offline ? 'Розетка не на зв\'язку' : (p.last_state ? 'Вимкнути' : 'Увімкнути')}" aria-label="Перемкнути ${escapeHtml(p.name)}">
+        <button type="button" class="device-action-btn ${p.last_state ? 'state-on' : 'state-off'}${toggleDisabled ? ' is-blocked' : ''}" data-act="toggle"
+                title="${toggleTitle}" aria-label="Перемкнути ${escapeHtml(p.name)}">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 2v10"/>
             <path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>
@@ -156,18 +179,19 @@
         </button>
       </div>`;
 
-    /* A disabled <button> has pointer-events:none (see the global
-     * "button:disabled" rule in style.css), which means it doesn't receive
-     * the click at all -- the browser hit-tests straight through it to
-     * whatever's underneath, which here is .device-action, and the event
-     * bubbles up from there instead. Without this guard that click would
-     * reach the card's own listener below and pop open the edit modal
-     * every time someone taps a greyed-out (offline) toggle -- checking
-     * for .device-action here (rather than the button itself, which won't
-     * be ev.target in the disabled case) covers both the enabled button
-     * (whose own listener already stopPropagation()s, so this is a no-op
-     * for it) and the disabled one (where this is the only thing that
-     * stops the modal from opening). */
+    /* The greyed-out (trigger-controlled / offline) look above is a CSS
+     * class now, not the `disabled` attribute, specifically so the button
+     * stays clickable (see the big comment above) -- but testPlug() below
+     * still sets the real `disabled` attribute for the brief in-flight
+     * window of an actual request, and a disabled <button> has
+     * pointer-events:none (global "button:disabled" rule in style.css), so
+     * a click during that window hit-tests straight through to whatever's
+     * underneath -- .device-action here -- and would otherwise bubble up
+     * and pop open the edit modal. Checking for .device-action here (rather
+     * than the button itself, which won't be ev.target in that case) covers
+     * both the normal case (button's own listener already
+     * stopPropagation()s, so this is a no-op) and that brief disabled
+     * window (where this is the only thing stopping the modal). */
     card.addEventListener('click', (ev) => {
       if (ev.target.closest('.device-action')) return;
       openPlugModal(p);
@@ -195,10 +219,10 @@
     if (btn) btn.disabled = true;
     try {
       const r = await api(`/api/plugs/${id}/action`, { method: 'POST', body: JSON.stringify({ action: on ? 'on' : 'off' }) });
-      if (!r.ok) toast(`"${name}": ${r.detail}`, true);
+      if (!r.ok) toast(`"${name}" ${r.detail}`, true);
       await loadPlugs();
     } catch (e) {
-      toast(`"${name}": ${e.message}`, true);
+      toast(`"${name}" ${e.message}`, true);
     } finally {
       pendingToggles.delete(id);
       if (btn) btn.disabled = false; /* harmless no-op if loadPlugs() already replaced this node */
@@ -762,10 +786,10 @@
         ? '<br><span class="bad">Вичерпано спроби підключення (ймовірно невірний пароль або SSID) — введіть дані ще раз і натисніть "Підключити".</span>'
         : '';
       el.innerHTML = (w.connected
-        ? `<span class="good">Підключено до "${escapeHtml(w.ssid)}" — IP ${w.sta_ip}</span>`
-        : `<span class="bad">Не підключено${w.ssid ? ` (збережено SSID "${escapeHtml(w.ssid)}")` : ''}</span>`) +
+        ? `<span class="good">STA: Підключено до "${escapeHtml(w.ssid)}" (${w.sta_ip})</span>`
+        : `<span class="bad">STA: Не підключено${w.ssid ? ` (збережено SSID "${escapeHtml(w.ssid)}")` : ''}</span>`) +
         failedNote +
-        `<br>Точка доступу для налаштування: IP ${w.ap_ip}`;
+        `<br>AP: Точка доступу для налаштування: IP ${w.ap_ip}`;
       /* Prefill both fields with the real stored values -- otherwise
        * clicking "Підключити" without retyping the password resubmits an
        * empty one and silently breaks a working connection. */

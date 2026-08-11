@@ -276,6 +276,10 @@ tr:last-child td { border-bottom: none; }
 .device-action-btn.state-on:hover { background: #157347; }
 .device-action-btn.state-off { background: var(--bs-red); color: #fff; }
 .device-action-btn.state-off:hover { background: var(--bs-red-dark); }
+/* Soft-blocked (trigger-controlled / offline): greyed out but still
+ * clickable on purpose -- see app.js's renderPlugRow() comment, the click
+ * is what surfaces the backend's specific rejection reason as a toast. */
+.device-action-btn.is-blocked { opacity: 0.5; cursor: not-allowed; }
 
 /* Mobile: collapse the same 4 pieces of info into 2 lines, as requested --
  * name+input on top, state+action below. */
@@ -301,6 +305,12 @@ tr:last-child td { border-bottom: none; }
   box-shadow: var(--bs-box-shadow);
   background: var(--bs-card-bg);
   overflow: hidden;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.inputs-list .input-row{
+  border: 1px solid var(--bs-border-color);
 }
 
 .input-row {
@@ -312,6 +322,7 @@ tr:last-child td { border-bottom: none; }
   font-size: 0.875rem;
   cursor: pointer;
 }
+
 .inputs-list > .input-row:last-child { border-bottom: none; }
 .input-row:hover { background: rgba(13, 110, 253, 0.04); }
 

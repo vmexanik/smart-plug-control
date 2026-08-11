@@ -62,10 +62,22 @@ void app_main(void)
         ESP_LOGW(TAG, "could not start system_health task, running without the reliability watchdog");
     }
 
-    /* Give the input poller a couple of sample cycles to establish stable
-     * levels, then push the current physical input state to bound plugs. */
-    vTaskDelay(pdMS_TO_TICKS(500));
-    plug_manager_sync_all_from_inputs();
+    /* Pushing the current physical input state to bound plugs used to
+     * happen right here (a flat 500ms delay, then
+     * plug_manager_sync_all_from_inputs()) -- moved into plug_manager.c's
+     * initial_status_task() instead, because 500ms is nowhere near enough
+     * time for STA to have an IP yet, and dispatching an actual on/off
+     * command before the network is up just burns driver_http_set()'s full
+     * 5s timeout on a doomed connection attempt with no retry, silently
+     * leaving the relay wherever it happened to power up rather than
+     * wherever the (possibly inverted) input says it should be. See that
+     * function's top comment for the full story. gpio_inputs_init() above
+     * still has to run this early in boot, though -- initial_status_task()
+     * only waits for Wi-Fi, it assumes the input poller is already
+     * sampling by the time it fires, which it always will be here (Wi-Fi
+     * association+DHCP realistically takes at least several hundred ms,
+     * gpio_inputs_init() runs synchronously microseconds after this
+     * function starts). */
 
     ESP_LOGI(TAG, "Smart Plug Control ready (%d plug(s) configured)", (int)cfg.plug_count);
 }

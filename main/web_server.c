@@ -412,7 +412,10 @@ static esp_err_t h_plugs_wildcard(httpd_req_t *req)
         else if (strcmp(action, "off") == 0) on = false;
         else return send_error(req, 400, "action must be \"on\" or \"off\"");
 
-        char detail[96] = {0};
+        /* 200, not 96: some rejection messages (e.g. the input-trigger one)
+         * are Cyrillic, which runs ~2 bytes/character in UTF-8 -- a 96-byte
+         * buffer truncated those mid multi-byte character. */
+        char detail[200] = {0};
         bool ok = false;
         esp_err_t err = plug_manager_test_action(id, on, detail, sizeof(detail), &ok);
         if (err == ESP_ERR_NOT_FOUND) return send_error(req, 404, "plug not found");

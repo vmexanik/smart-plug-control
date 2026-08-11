@@ -29,14 +29,12 @@
   </section>
 
   <section id="tab-settings" class="tab-content">
-    <h2>Вхідні порти (GPIO тригери)</h2>
-    <p class="hint">Оберіть, які входи використовує пристрій (можна декілька одночасно). <br>
-      Логіка: 1 на вході → розетка увімкнена, 0 → вимкнена; прапорець "інверсія" на розетці міняє це на протилежне. <br>
-      Піни GPIO, debounce і інтервал опитування — фіксовані прошивкою (`idf.py menuconfig` → Smart Plug Control), тут не редагуються.</p>
+    <h2>Вхідні тригери</h2>
+    <p class="hint">Оберіть, які тригери використовує пристрій (можна декілька одночасно). <br>
+      Логіка: 1 на вході → розетка увімкнена, 0 → вимкнена.
     <div class="inputs-list" id="inputs-tbody"></div>
 
     <h2>Wi-Fi</h2>
-    <p class="hint">Пристрій завжди піднімає резервну точку доступу (AP), щоб веб-морда була доступна навіть без STA-з'єднання.</p>
     <div id="wifi-status" class="status-block"></div>
     <div class="form-grid">
       <label>SSID мережі
@@ -55,7 +53,7 @@
     <button id="btn-save-wifi" class="primary">Підключити</button>
     <span id="wifi-save-result" class="save-result"></span>
 
-    <h2>MQTT брокер (спільний для всіх MQTT-розеток)</h2>
+    <h2>Налаштування підключення до MQTT брокера</h2>
     <div class="form-grid">
       <label>URI (напр. mqtt://192.168.1.10:1883)
         <input type="text" id="set-mqtt-uri" placeholder="mqtt://host:1883">
@@ -136,12 +134,11 @@
 
       <label>Драйвер / протокол
         <select id="pf-driver">
-          <option value="http">HTTP (вручну, довільний пристрій)</option>
+          <option value="http">HTTP</option>
           <option value="http:shelly_gen1">Shelly (Gen1)</option>
           <option value="http:shelly_gen2">Shelly (Gen2+/Gen3)</option>
           <option value="http:tasmota">Tasmota</option>
           <option value="mqtt">MQTT</option>
-          <option value="zigbee">Zigbee (заплановано, поки не працює)</option>
         </select>
       </label>
 
@@ -212,8 +209,6 @@
 <div id="scan-modal" class="modal hidden">
   <div class="modal-box">
     <h2>Пошук пристроїв у мережі</h2>
-    <p class="hint">Опитує підмережу Wi-Fi (STA), до якої підключений хаб — так само, як пошук по Bluetooth, тільки по локальній мережі. Знаходить будь-які активні пристрої (не тільки розетки), навіть ті, що не відповідають на ping (позначені "без ping" — типово для файрволу чи деяких IoT-прошивок); ті, що відповідають на порту 80, додатково перевіряються на Shelly/Tasmota/ESPHome — якщо розпізнано, клік одразу підставить готовий URL керування, якщо ні — тільки IP, як і раніше. Точки доступу пристрою (192.168.4.x) та інші підмережі цим способом не бачити. <br>
-      Пошук безперервний: після "Почати пошук" хаб перебирає підмережу по колу, поки не знайде розетку (пропускаючи вже знайдені) — не обов'язково знаходить усе з першого разу. Триває, поки не оберете рядок, не натиснете "Завершити пошук", чи не закриєте вікно (це теж зупиняє пошук).</p>
     <div id="scan-status" class="status-block">Натисніть "Почати пошук"</div>
     <table id="scan-table" class="table-plain">
       <thead>
@@ -232,7 +227,6 @@
 <div id="wifi-scan-modal" class="modal hidden">
   <div class="modal-box">
     <h2>Мережі Wi-Fi поруч</h2>
-    <p class="hint">Пошук триває кілька секунд і може ненадовго перервати вже підключену Wi-Fi (без розриву з'єднання). Приховані мережі (без SSID) у списку не показуються — таку мережу можна ввести вручну в полі SSID.</p>
     <div id="wifi-scan-status" class="status-block">Натисніть "Шукати"</div>
     <table id="wifi-scan-table" class="table-plain">
       <thead>
@@ -241,7 +235,7 @@
       <tbody id="wifi-scan-tbody"></tbody>
     </table>
     <div class="form-actions">
-      <button id="btn-wifi-scan-go" class="primary">Шукати</button>
+      <button id="btn-wifi-scan-go" class="primary">Почати пошук</button>
       <button type="button" id="btn-wifi-scan-close">Закрити</button>
     </div>
   </div>

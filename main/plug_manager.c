@@ -47,7 +47,12 @@ static esp_err_t save_locked(void)
 static esp_err_t do_dispatch(plug_t snapshot, bool on, const char *source,
                               char *detail_out, size_t detail_out_size, bool *ok_out)
 {
-    char detail[96] = {0};
+    /* 200, not 96: Cyrillic detail strings run ~2 bytes/character in UTF-8,
+     * so a message that reads as ~100 characters on screen can be 180+
+     * bytes on the wire -- a 96-byte buffer silently truncated those mid
+     * multi-byte character, corrupting the UTF-8 the browser then tried to
+     * decode. */
+    char detail[200] = {0};
     esp_err_t err;
 
     /* See app_types.h's doc comment on plug_t.reachable: this flag is only
@@ -255,11 +260,30 @@ static void metrics_poll_task(void *arg)
 }
 
 /* Boot-time "what's actually on right now" check for plugs restored from
- * config.json. plug_manager_add() already does this for a plug at the
- * moment it's created (see below); this is the same idea applied once, at
- * startup, to everything loaded from storage -- otherwise a saved plug
- * always starts out reported as "off" until its next command or metrics
- * poll, even if the physical relay was left on across a reboot. */
+ * config.json, PLUS pushing the current physical input state to every
+ * input-bound plug -- both jobs share the exact same precondition (no point
+ * doing either before the STA has an IP: reading a manual/HTTP plug's real
+ * status needs a network call, and so does actually commanding an input-
+ * bound plug's relay), so one wait-for-Wi-Fi dance covers both instead of
+ * duplicating it.
+ *
+ * The input-sync half used to be a separate, unconditional call from
+ * app_main.c (a flat 500ms delay after gpio_inputs_init(), long enough only
+ * for GPIO debounce, then straight into plug_manager_sync_all_from_inputs()
+ * regardless of whether Wi-Fi had come up yet). That's exactly what caused
+ * "reboots with an inverted input don't actually apply it": the enqueued
+ * command reached worker_task well before STA had an IP, driver_http_set()
+ * spent its whole 5s timeout failing to even open a TCP connection
+ * (ESP_ERR_HTTP_CONNECT), and -- critically -- nothing ever retried it, so
+ * the relay just stayed wherever it happened to be at power-on, silently
+ * disagreeing with the input the whole time.
+ *
+ * plug_manager_add() already does the "what's actually on" half for a
+ * single plug at the moment it's created (see below); this is the same
+ * idea applied once, at startup, to everything loaded from storage --
+ * otherwise a saved plug always starts out reported as "off" until its
+ * next command or metrics poll, even if the physical relay was left on
+ * across a reboot. */
 #define INITIAL_STATUS_TASK_STACK   12288 /* esp_http_client-calling task, see worker_task's comment */
 #define INITIAL_STATUS_WAIT_STEP_MS 1000
 #define INITIAL_STATUS_WAIT_MAX_MS  (30 * 1000)
@@ -273,13 +297,19 @@ static void initial_status_task(void *arg)
      * doesn't block on it), so wait for a real connection first -- up to a
      * bounded timeout, and bailing out early if the STA config itself is
      * bad (wrong password etc., see wifi_manager_sta_config_error()) since
-     * that's never going to resolve on its own. Skipping the check
-     * entirely in either case is fine: plugs just keep their storage
-     * default (last_state = false) same as before this feature existed. */
+     * that's never going to resolve on its own. Skipping both halves of
+     * this task entirely in either case is fine and correct, not just a
+     * fallback: without any STA connectivity there is no network path to
+     * command ANY HTTP or MQTT plug (input-bound or not) regardless of how
+     * long we wait, so retrying the input sync separately wouldn't help --
+     * plugs just keep their storage default (last_state = false) same as
+     * before this feature existed, and the normal input-driven path
+     * (plug_manager_on_input_change(), fired on the next real level change)
+     * takes over once/if the network does come up. */
     int waited_ms = 0;
     while (!wifi_manager_is_connected() && waited_ms < INITIAL_STATUS_WAIT_MAX_MS) {
         if (wifi_manager_sta_config_error()) {
-            ESP_LOGW(TAG, "initial status check: STA not configured/failed, skipping");
+            ESP_LOGW(TAG, "initial status check: STA not configured/failed, skipping (incl. input sync)");
             vTaskDelete(NULL);
             return;
         }
@@ -287,7 +317,7 @@ static void initial_status_task(void *arg)
         waited_ms += INITIAL_STATUS_WAIT_STEP_MS;
     }
     if (!wifi_manager_is_connected()) {
-        ESP_LOGW(TAG, "initial status check: STA still not connected after %ds, skipping",
+        ESP_LOGW(TAG, "initial status check: STA still not connected after %ds, skipping (incl. input sync)",
                  INITIAL_STATUS_WAIT_MAX_MS / 1000);
         vTaskDelete(NULL);
         return;
@@ -326,6 +356,15 @@ static void initial_status_task(void *arg)
         event_log_append(LOG_SRC_BOOT, snapshot[i].name, on ? "on" : "off", true, "initial status check");
     }
     ESP_LOGI(TAG, "initial status check: %u/%u plug(s) confirmed", (unsigned)checked, (unsigned)n);
+
+    /* Now that STA is confirmed connected, push the current physical input
+     * state to every input-bound plug (see this function's top comment for
+     * why this has to wait for the same thing the status check above does).
+     * Unlike the loop above, this isn't restricted to fingerprinted HTTP
+     * families -- plug_manager_sync_all_from_inputs() covers any driver
+     * (HTTP with a manual/unrecognized URL, MQTT too), same as it already
+     * does when called after an inputs-tab settings save. */
+    plug_manager_sync_all_from_inputs();
 
     vTaskDelete(NULL);
 }
@@ -520,6 +559,19 @@ esp_err_t plug_manager_update(uint32_t id, const plug_t *in)
     xSemaphoreGive(s_lock);
 
     event_log_append(LOG_SRC_API, updated.name, "updated", true, NULL);
+
+    /* Editing a plug's "Вхід"/"Інверсія" only takes effect the *next* time
+     * that physical input actually transitions (plug_manager_on_input_change
+     * only runs on a change, see gpio_inputs.c's poll_task) -- without this,
+     * saving a new invert setting while the input has been sitting at a
+     * steady level for a while (the common case -- inputs don't flip just
+     * because someone edited a plug) would silently do nothing until the
+     * input happened to toggle again, which looks exactly like "the
+     * checkbox doesn't work". Re-evaluate every enabled, input-bound plug
+     * against the input's *current* level right now instead of waiting.
+     * Same call plug_manager_update_settings() already makes after an
+     * inputs-tab save, for the identical reason. */
+    plug_manager_sync_all_from_inputs();
     return err;
 }
 
@@ -556,6 +608,22 @@ esp_err_t plug_manager_test_action(uint32_t id, bool on, char *detail, size_t de
         if (detail) snprintf(detail, detail_size, "plug not found");
         if (ok_out) *ok_out = false;
         return ESP_ERR_NOT_FOUND;
+    }
+
+    /* A plug bound to a physical input is driven exclusively by that input
+     * (see plug_manager_on_input_change()/plug_manager_sync_all_from_
+     * inputs()) -- letting a manual command through here as well means two
+     * competing sources of truth for the same relay: the input can flip it
+     * back the moment it next changes (or right now, via the sync call
+     * above), silently undoing whatever the manual click just did. Refusing
+     * it here (rather than just hiding the button in the web UI, which
+     * plug_manager_test_action() itself doesn't know or enforce) also
+     * protects the /api/plugs/{id}/action endpoint directly, not just the
+     * one caller that happens to grey out its own button. */
+    if (snapshot.input != INPUT_NONE) {
+        if (detail) snprintf(detail, detail_size, "керується входом. Для ручного керування виберіть відповідне налаштування.");
+        if (ok_out) *ok_out = false;
+        return ESP_ERR_INVALID_STATE;
     }
 
     return do_dispatch(snapshot, on, LOG_SRC_MANUAL, detail, detail_size, ok_out);
