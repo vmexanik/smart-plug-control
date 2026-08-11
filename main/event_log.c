@@ -1,6 +1,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <sys/stat.h>
 #include <time.h>
 #include "esp_log.h"
@@ -68,6 +69,37 @@ static void rotate_locked(void)
     }
 }
 
+/* Appends fixed JSON syntax (not user data -- json_escape_append() below
+ * handles that) to dst, clamping pos so it can never run past dst_size.
+ *
+ * The pattern this replaces -- `pos += snprintf(dst + pos, dst_size - pos,
+ * fmt, ...)` -- is NOT safe: snprintf() returns the length it *would* have
+ * written had the buffer been big enough, not what actually fit. If an
+ * earlier field (plug name, detail -- both attacker/user-controlled length,
+ * detail especially since it can now carry ~200-byte Cyrillic messages, see
+ * do_dispatch()'s `char detail[200]`) has already pushed pos close to
+ * dst_size, that add-the-wanted-not-the-written-length arithmetic can push
+ * pos *past* dst_size. The next call then computes `dst_size - pos` as an
+ * unsigned (size_t) subtraction that wraps to a huge number, so snprintf
+ * believes it has gigabytes of room -- and even without that wraparound,
+ * the final `fwrite(line, 1, pos, f)` reads `pos` bytes from a buffer only
+ * dst_size bytes long, i.e. an out-of-bounds stack read landing garbage
+ * bytes into the log file, which can corrupt that line's JSON badly enough
+ * to break event_log_read_recent()'s whole response (it just concatenates
+ * raw lines with commas -- one bad line invalidates the entire array). */
+static size_t append_fmt(char *dst, size_t dst_size, size_t pos, const char *fmt, ...)
+{
+    if (pos >= dst_size) return pos;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(dst + pos, dst_size - pos, fmt, ap);
+    va_end(ap);
+    if (n <= 0) return pos;
+    size_t avail = dst_size - pos; /* includes the byte for the NUL */
+    size_t written = ((size_t)n < avail) ? (size_t)n : avail - 1;
+    return pos + written;
+}
+
 static void json_escape_append(char *dst, size_t dst_size, size_t *pos, const char *src)
 {
     if (!src) return;
@@ -100,21 +132,28 @@ void event_log_append(const char *source, const char *plug_name,
         return;
     }
 
-    char line[256];
+    /* 384, not 256: plug names can be up to PLUG_NAME_LEN(32) bytes and
+     * detail strings up to ~200 bytes of Cyrillic (see do_dispatch()'s
+     * `char detail[200]`) -- 256 left barely any room for the surrounding
+     * JSON syntax once both are near their max. append_fmt()/
+     * json_escape_append() both clamp to this size regardless, so this is
+     * headroom for correctness of *content*, not a safety requirement (the
+     * safety part is that neither helper can run pos past the buffer). */
+    char line[384];
     size_t pos = 0;
     /* Real epoch seconds -- reads as 1970 until NTP syncs or the user sets
      * the clock manually via the web UI (see time_sync.c / POST /api/time). */
     time_t now = time(NULL);
 
-    pos += snprintf(line, sizeof(line), "{\"t\":%lld,\"src\":\"", (long long)now);
+    pos = append_fmt(line, sizeof(line), pos, "{\"t\":%lld,\"src\":\"", (long long)now);
     json_escape_append(line, sizeof(line), &pos, source ? source : "");
-    pos += snprintf(line + pos, sizeof(line) - pos, "\",\"plug\":\"");
+    pos = append_fmt(line, sizeof(line), pos, "\",\"plug\":\"");
     json_escape_append(line, sizeof(line), &pos, plug_name ? plug_name : "");
-    pos += snprintf(line + pos, sizeof(line) - pos, "\",\"action\":\"");
+    pos = append_fmt(line, sizeof(line), pos, "\",\"action\":\"");
     json_escape_append(line, sizeof(line), &pos, action ? action : "");
-    pos += snprintf(line + pos, sizeof(line) - pos, "\",\"ok\":%s,\"detail\":\"", ok ? "true" : "false");
+    pos = append_fmt(line, sizeof(line), pos, "\",\"ok\":%s,\"detail\":\"", ok ? "true" : "false");
     json_escape_append(line, sizeof(line), &pos, detail ? detail : "");
-    pos += snprintf(line + pos, sizeof(line) - pos, "\"}\n");
+    pos = append_fmt(line, sizeof(line), pos, "\"}\n");
 
     fwrite(line, 1, pos, f);
     fclose(f);

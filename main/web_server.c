@@ -482,6 +482,21 @@ static void settings_from_json(const cJSON *root, system_settings_t *s)
     jget_str(root, "mqtt_client_id", s->mqtt_client_id, sizeof(s->mqtt_client_id));
     s->log_max_file_size = (uint32_t)jget_int(root, "log_max_file_size", (int)s->log_max_file_size);
     s->log_max_files = (uint32_t)jget_int(root, "log_max_files", (int)s->log_max_files);
+    /* Clamp rather than trust the raw input: a 0 or negative value here
+     * would cast to a huge uint32_t (jget_int's return is signed, and a
+     * negative number wraps on the cast above), which for log_max_file_size
+     * means rotation effectively never triggers (log grows without bound),
+     * and for log_max_files means rotate_locked()'s `for (unsigned i =
+     * s_max_files - 1; ...)` loop in event_log.c counts down from billions
+     * -- a multi-minute hang holding the log's mutex. The upper bounds
+     * mirror event_log.c's own limits: read_whole_file() already refuses to
+     * load a log file bigger than 256KB, and event_log_read_recent() only
+     * ever looks at MAX_SOURCE_FILES (8) files, so anything beyond these
+     * just wastes flash without the log viewer ever seeing it. */
+    if (s->log_max_file_size < 4096) s->log_max_file_size = 4096;
+    if (s->log_max_file_size > 262144) s->log_max_file_size = 262144;
+    if (s->log_max_files < 1) s->log_max_files = 1;
+    if (s->log_max_files > 8) s->log_max_files = 8;
 
     /* Belt-and-braces: gpio/debounce/poll_interval can never be changed via
      * this endpoint. */
