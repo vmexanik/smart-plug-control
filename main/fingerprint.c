@@ -9,7 +9,19 @@
 
 static const char *TAG = "fingerprint";
 
-#define FETCH_BUF_SIZE 2048
+/* 8192, not 2048: try_tasmota()'s primary probe is "cmnd=Status 0", which
+ * asks Tasmota for its FULL combined status blob (Status + StatusPRM +
+ * StatusFWR + StatusLOG + StatusMEM + StatusNET + StatusMQT + StatusTIM +
+ * StatusSNS + StatusSTS all in one reply) -- routinely 3-6KB on real
+ * devices, well past the old 2048-byte cap. http_event_handler() silently
+ * stops copying once the buffer fills, but esp_http_client_perform() still
+ * returns ESP_OK (the transfer itself completed fine on the wire, only our
+ * own copy was truncated), so try_tasmota() went on to cJSON_Parse() a
+ * body cut off mid-object -- an unavoidable parse failure -- and reported
+ * "not Tasmota" for a device that was actually answering correctly. This
+ * is exactly why detection failed while manually-configured on/off calls
+ * (driver_http.c's Power1 On/Off, whose replies are tiny) kept working. */
+#define FETCH_BUF_SIZE 8192
 
 /* ---------------------------------------------------------------------- */
 /* small HTTP GET helper -- captures the response body (fingerprint.c needs

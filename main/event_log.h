@@ -15,6 +15,7 @@ extern "C" {
 #define LOG_SRC_API     "api"
 #define LOG_SRC_BOOT    "boot"
 #define LOG_SRC_SYSTEM  "system"
+#define LOG_SRC_AC_MON  "ac_mon"
 
 esp_err_t event_log_init(const system_settings_t *settings);
 

@@ -16,6 +16,12 @@ void plug_manager_sync_all_from_inputs(void);
 /* gpio_inputs callback target. */
 void plug_manager_on_input_change(input_id_t id, bool level);
 
+/* ac_monitor callback target -- see ac_mon_change_cb_t in ac_monitor.h.
+ * Gates AC1-bound plugs off when mains goes out of the configured
+ * voltage/frequency band (and enabled), re-syncs them to the AC1 input's
+ * current level when it comes back in band. */
+void plug_manager_on_ac_mon_change(bool in_band);
+
 /* ---- Plug CRUD (thread-safe, persists to flash on every mutation) ---- */
 size_t plug_manager_get_all(plug_t *out, size_t max_out);
 esp_err_t plug_manager_get(uint32_t id, plug_t *out);

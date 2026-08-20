@@ -5,6 +5,9 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "cJSON.h"
 #include "sdkconfig.h"
 #include "web_server.h"
@@ -17,6 +20,7 @@
 #include "time_sync.h"
 #include "net_scan.h"
 #include "fingerprint.h"
+#include "ac_monitor.h"
 
 static const char *TAG = "web_server";
 
@@ -109,6 +113,12 @@ static int jget_int(const cJSON *obj, const char *key, int def)
 {
     const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
     return cJSON_IsNumber(v) ? v->valueint : def;
+}
+
+static float jget_float(const cJSON *obj, const char *key, float def)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
+    return cJSON_IsNumber(v) ? (float)v->valuedouble : def;
 }
 
 static const char *input_label(input_id_t id)
@@ -322,6 +332,29 @@ static esp_err_t h_favicon(httpd_req_t *req)
                             web_favicon_svg_end - web_favicon_svg_start);
 }
 
+/* Every one of these paths is a different OS's captive-portal probe --
+ * what it requests right after joining a Wi-Fi network to decide whether
+ * to pop up a "Sign in to network" browser. A plain 302 to "/" is the one
+ * response that reliably triggers that popup on all of them (each expects
+ * a specific "no portal here" response -- 204 for Android, a fixed
+ * "Success" body for Apple, a fixed text body for Windows/Firefox -- so
+ * *any* redirect reads as "there's a portal, go there" across the board).
+ * Paired with captive_dns.c (resolves every hostname an AP client looks up,
+ * including whatever domain each OS's probe targets, to this device's own
+ * IP) and wifi_manager_init()'s AP DHCP DNS option (what points those
+ * lookups here in the first place) -- see captive_dns.h for the full
+ * chain. Relative Location works fine even though the client thinks it's
+ * talking to some public hostname (e.g. connectivitycheck.gstatic.com):
+ * the TCP connection was already to this device (DNS hijack), so "/"
+ * simply lands back on us and hits the normal h_index route. */
+static esp_err_t h_captive_redirect(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "/");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, NULL, 0);
+}
+
 /* ---------------------------------------------------------------------- */
 /* /api/plugs                                                              */
 /* ---------------------------------------------------------------------- */
@@ -453,6 +486,15 @@ static cJSON *settings_to_json(const system_settings_t *s)
     cJSON_AddStringToObject(root, "mqtt_client_id", s->mqtt_client_id);
     cJSON_AddNumberToObject(root, "log_max_file_size", s->log_max_file_size);
     cJSON_AddNumberToObject(root, "log_max_files", s->log_max_files);
+
+    cJSON *ac_mon = cJSON_CreateObject();
+    cJSON_AddBoolToObject(ac_mon, "enabled", s->ac_mon.enabled);
+    cJSON_AddNumberToObject(ac_mon, "v_min", s->ac_mon.v_min);
+    cJSON_AddNumberToObject(ac_mon, "v_max", s->ac_mon.v_max);
+    cJSON_AddNumberToObject(ac_mon, "f_min", (double)s->ac_mon.f_min);
+    cJSON_AddNumberToObject(ac_mon, "f_max", (double)s->ac_mon.f_max);
+    cJSON_AddItemToObject(root, "ac_mon", ac_mon);
+
     return root;
 }
 
@@ -498,6 +540,27 @@ static void settings_from_json(const cJSON *root, system_settings_t *s)
     if (s->log_max_files < 1) s->log_max_files = 1;
     if (s->log_max_files > 8) s->log_max_files = 8;
 
+    const cJSON *ac_mon = cJSON_GetObjectItemCaseSensitive(root, "ac_mon");
+    if (ac_mon) {
+        s->ac_mon.enabled = jget_bool(ac_mon, "enabled", s->ac_mon.enabled);
+        s->ac_mon.v_min = jget_int(ac_mon, "v_min", s->ac_mon.v_min);
+        s->ac_mon.v_max = jget_int(ac_mon, "v_max", s->ac_mon.v_max);
+        s->ac_mon.f_min = jget_float(ac_mon, "f_min", s->ac_mon.f_min);
+        s->ac_mon.f_max = jget_float(ac_mon, "f_max", s->ac_mon.f_max);
+
+        /* Sanity-clamp to a plausible mains range (this is a threshold for
+         * *detecting trouble*, not a hard device limit, but nothing sane
+         * runs outside 100-300V/40-70Hz) and make sure min <= max -- a
+         * flipped/equal band would make ac_monitor.c's in-band check either
+         * never pass or always pass, silently defeating the whole point. */
+        if (s->ac_mon.v_min < 100) s->ac_mon.v_min = 100;
+        if (s->ac_mon.v_max > 300) s->ac_mon.v_max = 300;
+        if (s->ac_mon.v_min > s->ac_mon.v_max) s->ac_mon.v_min = s->ac_mon.v_max;
+        if (s->ac_mon.f_min < 40.0f) s->ac_mon.f_min = 40.0f;
+        if (s->ac_mon.f_max > 70.0f) s->ac_mon.f_max = 70.0f;
+        if (s->ac_mon.f_min > s->ac_mon.f_max) s->ac_mon.f_min = s->ac_mon.f_max;
+    }
+
     /* Belt-and-braces: gpio/debounce/poll_interval can never be changed via
      * this endpoint. */
     storage_force_fixed_inputs(s);
@@ -527,6 +590,66 @@ static esp_err_t h_settings_post(httpd_req_t *req)
     if (err != ESP_OK) return send_error(req, 500, "failed to save settings");
 
     return send_json(req, settings_to_json(&s), 200);
+}
+
+/* ---------------------------------------------------------------------- */
+/* /api/config/export, /api/config/import, /api/system/restart             */
+/* ---------------------------------------------------------------------- */
+
+/* config.json can hold up to MAX_PLUGS(32) plugs plus settings -- storage.c
+ * itself caps a loadable config.json at 64KB (see storage_load_config()),
+ * so that's the natural size here too. Static, not a stack local: the httpd
+ * worker task's stack (12288B, see web_server_start()) is generous for
+ * short-lived JSON bodies elsewhere in this file, but nowhere near 64KB. */
+#define CONFIG_TRANSFER_BUF_SIZE 65536
+static char s_config_transfer_buf[CONFIG_TRANSFER_BUF_SIZE];
+
+static esp_err_t h_config_export(httpd_req_t *req)
+{
+    size_t len = 0;
+    esp_err_t err = storage_read_raw_config(s_config_transfer_buf, sizeof(s_config_transfer_buf), &len);
+    if (err == ESP_ERR_NOT_FOUND) return send_error(req, 404, "no config saved yet");
+    if (err != ESP_OK) return send_error(req, 500, "config too large to export");
+
+    httpd_resp_set_type(req, "application/json");
+    /* Prompts the browser to download it as a file instead of navigating to
+     * it -- the whole point of "export" is a file the user can keep
+     * somewhere safe, e.g. before an OTA update that repartitions flash and
+     * wipes this exact file (see README "OTA оновлення"). */
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"smartplug-config.json\"");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, s_config_transfer_buf, len);
+}
+
+static esp_err_t h_config_import(httpd_req_t *req)
+{
+    if (recv_body(req, s_config_transfer_buf, sizeof(s_config_transfer_buf)) != ESP_OK) {
+        return send_error(req, 400, "body too large or missing");
+    }
+
+    esp_err_t err = storage_write_raw_config(s_config_transfer_buf, strlen(s_config_transfer_buf));
+    if (err == ESP_ERR_INVALID_ARG) return send_error(req, 400, "not a valid config file (expected \"plugs\"/\"settings\")");
+    if (err != ESP_OK) return send_error(req, 500, "failed to write config");
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    cJSON_AddStringToObject(resp, "detail", "config saved -- reboot the device (POST /api/system/restart) to apply it");
+    return send_json(req, resp, 200);
+}
+
+static esp_err_t h_system_restart(httpd_req_t *req)
+{
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    esp_err_t err = send_json(req, resp, 200);
+
+    event_log_append(LOG_SRC_API, "-", "restart", true, "manual restart requested via web UI");
+    /* Best-effort: give the response above and the log line's LittleFS
+     * write a moment to actually land before the reset -- same reasoning
+     * as system_health.c's restart_with_log(), not a guarantee. */
+    vTaskDelay(pdMS_TO_TICKS(300));
+    esp_restart();
+    return err; /* unreachable */
 }
 
 /* ---------------------------------------------------------------------- */
@@ -592,6 +715,16 @@ static esp_err_t h_status_get(httpd_req_t *req)
     cJSON_AddStringToObject(wifi, "ap_ip", ap_ip);
     cJSON_AddStringToObject(wifi, "ssid", ssid);
     cJSON_AddItemToObject(root, "wifi", wifi);
+
+    ac_mon_reading_t ac_reading;
+    ac_monitor_get_reading(&ac_reading);
+    cJSON *ac_mon = cJSON_CreateObject();
+    cJSON_AddBoolToObject(ac_mon, "have_reading", ac_reading.have_reading);
+    cJSON_AddBoolToObject(ac_mon, "mains_present", ac_reading.mains_present);
+    cJSON_AddNumberToObject(ac_mon, "vrms", (double)ac_reading.vrms);
+    cJSON_AddNumberToObject(ac_mon, "freq_hz", (double)ac_reading.freq_hz);
+    cJSON_AddBoolToObject(ac_mon, "in_band", ac_reading.in_band);
+    cJSON_AddItemToObject(root, "ac_mon", ac_mon);
 
     cJSON_AddNumberToObject(root, "uptime_s", (double)(esp_timer_get_time() / 1000000));
 
@@ -799,7 +932,7 @@ esp_err_t web_server_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = CONFIG_WEB_HTTP_PORT;
     config.uri_match_fn = httpd_uri_match_wildcard;
-    config.max_uri_handlers = 26;
+    config.max_uri_handlers = 40; /* 25 API/static routes + 7 captive-portal probes + 3 config export/import/restart, some headroom */
     /* The manual on/off test button (POST /api/plugs/{id}/action) runs
      * driver_http_set() -- and therefore esp_http_client -- synchronously
      * on this httpd worker task, same as plug_manager.c's own worker_task.
@@ -844,6 +977,19 @@ esp_err_t web_server_start(void)
         { .uri = "/api/scan",      .method = HTTP_POST,   .handler = h_scan_start },
         { .uri = "/api/scan",      .method = HTTP_GET,    .handler = h_scan_status },
         { .uri = "/api/scan",      .method = HTTP_DELETE, .handler = h_scan_stop },
+        /* OS captive-portal detection probes -- see h_captive_redirect()'s
+         * doc comment for why a 302 to "/" is the right answer for all of
+         * them. */
+        { .uri = "/generate_204",              .method = HTTP_GET, .handler = h_captive_redirect }, /* Android/Chromium */
+        { .uri = "/gen_204",                   .method = HTTP_GET, .handler = h_captive_redirect }, /* older Android */
+        { .uri = "/hotspot-detect.html",       .method = HTTP_GET, .handler = h_captive_redirect }, /* Apple, current */
+        { .uri = "/library/test/success.html", .method = HTTP_GET, .handler = h_captive_redirect }, /* Apple, older */
+        { .uri = "/connecttest.txt",           .method = HTTP_GET, .handler = h_captive_redirect }, /* Windows 10/11 NCSI */
+        { .uri = "/ncsi.txt",                  .method = HTTP_GET, .handler = h_captive_redirect }, /* Windows, older */
+        { .uri = "/success.txt",               .method = HTTP_GET, .handler = h_captive_redirect }, /* Firefox/Mozilla */
+        { .uri = "/api/config/export",  .method = HTTP_GET,  .handler = h_config_export },
+        { .uri = "/api/config/import",  .method = HTTP_POST, .handler = h_config_import },
+        { .uri = "/api/system/restart", .method = HTTP_POST, .handler = h_system_restart },
     };
 
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {

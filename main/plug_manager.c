@@ -14,6 +14,7 @@
 #include "driver_mqtt.h"
 #include "driver_zigbee.h"
 #include "wifi_manager.h"
+#include "ac_monitor.h"
 
 static const char *TAG = "plug_manager";
 
@@ -21,6 +22,12 @@ static app_config_t s_cfg;
 static SemaphoreHandle_t s_lock;
 static QueueHandle_t s_action_queue;
 static uint32_t s_next_id = 1;
+/* Latest in-band status from ac_monitor.c (see plug_manager_on_ac_mon_change()
+ * below). Starts true -- matches ac_monitor.c's own "nothing to protect
+ * against yet" default before its first real reading, so AC1-bound plugs
+ * aren't held off at boot waiting for a sample window. Guarded by s_lock,
+ * same as the rest of s_cfg. */
+static bool s_ac_mon_in_band = true;
 
 typedef struct {
     uint32_t plug_id;
@@ -435,6 +442,21 @@ esp_err_t plug_manager_init(const app_config_t *initial_cfg)
     return ESP_OK;
 }
 
+/* AC1-bound plugs get an extra safety gate on top of the normal
+ * level^invert logic: if AC mains monitoring is enabled and the last AC
+ * monitor reading was out of the configured voltage/frequency band, force
+ * the plug off regardless of what the AC1 digital input itself says --
+ * out-of-band mains is exactly the situation an AC1-triggered plug (e.g.
+ * "turn on when mains is present") should NOT be energized in. Caller must
+ * already hold s_lock. */
+static bool gate_ac1(const plug_t *p, bool want)
+{
+    if (p->input != INPUT_AC1) return want;
+    if (!s_cfg.settings.ac_mon.enabled) return want;
+    if (!s_ac_mon_in_band) return false;
+    return want;
+}
+
 void plug_manager_on_input_change(input_id_t id, bool level)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -445,7 +467,7 @@ void plug_manager_on_input_change(input_id_t id, bool level)
         plug_t *p = &s_cfg.plugs[i];
         if (!p->enabled || p->input != id) continue;
         targets[n] = p->id;
-        desired[n] = level ^ p->invert;
+        desired[n] = gate_ac1(p, level ^ p->invert);
         n++;
     }
     xSemaphoreGive(s_lock);
@@ -467,13 +489,43 @@ void plug_manager_sync_all_from_inputs(void)
         if (!gpio_inputs_is_enabled(p->input)) continue;
         bool level = gpio_inputs_get_level(p->input);
         targets[n] = p->id;
-        desired[n] = level ^ p->invert;
+        desired[n] = gate_ac1(p, level ^ p->invert);
         n++;
     }
     xSemaphoreGive(s_lock);
 
     for (size_t i = 0; i < n; i++) {
         enqueue_action(targets[i], desired[i], LOG_SRC_BOOT);
+    }
+}
+
+/* ac_monitor.c callback target -- fired only on an actual in-band/out-of-band
+ * transition (see ac_monitor.h). Re-evaluates every AC1-bound plug against
+ * the new status: going out of band force-drops them (see gate_ac1() above),
+ * coming back in band re-applies whatever the AC1 input itself currently
+ * says. Plugs bound to other inputs, or not bound to any input, are
+ * untouched -- this is deliberately scoped to AC1 only, same as
+ * plug_manager_on_input_change()'s own per-input filtering. */
+void plug_manager_on_ac_mon_change(bool in_band)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_ac_mon_in_band = in_band;
+    uint32_t targets[MAX_PLUGS];
+    bool desired[MAX_PLUGS];
+    size_t n = 0;
+    for (size_t i = 0; i < s_cfg.plug_count; i++) {
+        plug_t *p = &s_cfg.plugs[i];
+        if (!p->enabled || p->input != INPUT_AC1) continue;
+        if (!gpio_inputs_is_enabled(p->input)) continue;
+        bool level = gpio_inputs_get_level(p->input);
+        targets[n] = p->id;
+        desired[n] = gate_ac1(p, level ^ p->invert);
+        n++;
+    }
+    xSemaphoreGive(s_lock);
+
+    for (size_t i = 0; i < n; i++) {
+        enqueue_action(targets[i], desired[i], LOG_SRC_AC_MON);
     }
 }
 
@@ -650,6 +702,7 @@ esp_err_t plug_manager_update_settings(const system_settings_t *in)
     gpio_inputs_update_settings(&new_settings);
     event_log_update_limits(new_settings.log_max_file_size, new_settings.log_max_files);
     driver_mqtt_apply_settings(&new_settings);
+    ac_monitor_update_settings(&new_settings.ac_mon);
 
     event_log_append(LOG_SRC_SYSTEM, "-", "settings_updated", true, NULL);
 

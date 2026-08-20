@@ -2,6 +2,12 @@
 #include <stdio.h>
 #include "esp_wifi.h"
 #include "esp_netif.h"
+/* dhcps_offer_t / OFFER_DNS, see wifi_manager_init()'s AP DHCP DNS setup --
+ * this header ships inside the "lwip" component (components/lwip/apps/
+ * dhcpserver/), not a separate "dhcpserver" component -- listing the
+ * latter in main/CMakeLists.txt's REQUIRES fails the build ("unknown
+ * name"), lwip (already required) is enough. */
+#include "dhcpserver/dhcpserver.h"
 #include "esp_event.h"
 #include "esp_mac.h"
 #include "esp_log.h"
@@ -290,6 +296,38 @@ esp_err_t wifi_manager_init(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
 
+    /* Captive-portal DNS hijack (captive_dns.c) resolves every hostname an
+     * AP client looks up to the AP's own IP -- but that only matters if the
+     * client's DHCP lease actually points its DNS queries at us. softAP's
+     * DHCP server does NOT offer a DNS server by default, so without this,
+     * a phone joined to the fallback AP silently keeps its previous
+     * (likely internet-facing, now unreachable) DNS server and the whole
+     * hijack never gets a chance to run. esp_netif_get_ip_info() works
+     * here even before esp_wifi_start() -- softAP's IP (192.168.4.1) is a
+     * static default baked into ESP_NETIF_DEFAULT_WIFI_AP()'s inherent
+     * config, not something obtained dynamically like STA's. */
+    esp_netif_ip_info_t ap_ip;
+    if (esp_netif_get_ip_info(s_ap_netif, &ap_ip) == ESP_OK) {
+        esp_netif_dns_info_t dns = {0};
+        dns.ip.u_addr.ip4.addr = ap_ip.ip.addr;
+        dns.ip.type = IPADDR_TYPE_V4;
+        dhcps_offer_t dhcps_dns_value = OFFER_DNS;
+        esp_err_t dns_err = esp_netif_dhcps_option(s_ap_netif, ESP_NETIF_OP_SET,
+                                                    ESP_NETIF_DOMAIN_NAME_SERVER,
+                                                    &dhcps_dns_value, sizeof(dhcps_dns_value));
+        if (dns_err == ESP_OK) {
+            dns_err = esp_netif_set_dns_info(s_ap_netif, ESP_NETIF_DNS_MAIN, &dns);
+        }
+        if (dns_err != ESP_OK) {
+            ESP_LOGW(TAG, "could not configure AP DHCP DNS option: %s", esp_err_to_name(dns_err));
+        }
+    }
+    /* Deliberately NOT calling esp_netif_dhcps_start() here -- this netif
+     * came from esp_netif_create_default_wifi_ap(), which already has the
+     * default Wi-Fi glue that starts the DHCP server automatically on
+     * WIFI_EVENT_AP_START (fired by esp_wifi_start() below). The option
+     * configured above just needs to be in place before that happens. */
+
     if (s_have_sta_creds) {
         wifi_config_t sta_cfg = {0};
         strncpy((char *)sta_cfg.sta.ssid, s_sta_ssid, sizeof(sta_cfg.sta.ssid) - 1);
@@ -396,6 +434,12 @@ bool wifi_manager_get_sta_ip_info(esp_netif_ip_info_t *out)
 {
     if (!s_sta_connected || !out) return false;
     return esp_netif_get_ip_info(s_sta_netif, out) == ESP_OK;
+}
+
+bool wifi_manager_get_ap_ip_info(esp_netif_ip_info_t *out)
+{
+    if (!out) return false;
+    return esp_netif_get_ip_info(s_ap_netif, out) == ESP_OK;
 }
 
 bool wifi_manager_get_sta_dns(esp_ip4_addr_t *out)

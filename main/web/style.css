@@ -309,8 +309,10 @@ tr:last-child td { border-bottom: none; }
   grid-template-columns: repeat(3, 1fr);
 }
 
-.inputs-list .input-row{
-  border: 1px solid var(--bs-border-color);
+.inputs-list .input-row:nth-child(even) {
+    border-left: 1px solid var(--bs-border-color);
+    border-right: 1px solid var(--bs-border-color);
+    justify-content: center;
 }
 
 .input-row {

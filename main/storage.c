@@ -72,6 +72,17 @@ void storage_default_config(app_config_t *cfg)
 
     cfg->settings.log_max_file_size = 65536;
     cfg->settings.log_max_files = 5;
+
+    /* Off by default -- no ZMPT101B connected means every reading would be
+     * "no mains", which isn't a useful default for anyone who hasn't wired
+     * one up. Band is a generic +-10%/+-2% starting point around 230V/50Hz;
+     * meant to be tuned per-installation from the web UI, not treated as a
+     * real spec. */
+    cfg->settings.ac_mon.enabled = false;
+    cfg->settings.ac_mon.v_min = 200;
+    cfg->settings.ac_mon.v_max = 250;
+    cfg->settings.ac_mon.f_min = 49.00f;
+    cfg->settings.ac_mon.f_max = 51.00f;
 }
 
 /* ---- JSON <-> struct ---- */
@@ -136,6 +147,12 @@ static int json_get_int(const cJSON *obj, const char *key, int def)
     return cJSON_IsNumber(v) ? v->valueint : def;
 }
 
+static float json_get_float(const cJSON *obj, const char *key, float def)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
+    return cJSON_IsNumber(v) ? (float)v->valuedouble : def;
+}
+
 static void plug_from_json(const cJSON *o, plug_t *p)
 {
     memset(p, 0, sizeof(*p));
@@ -198,6 +215,14 @@ static cJSON *settings_to_json(const system_settings_t *s)
     cJSON_AddNumberToObject(root, "log_max_file_size", s->log_max_file_size);
     cJSON_AddNumberToObject(root, "log_max_files", s->log_max_files);
 
+    cJSON *ac_mon = cJSON_CreateObject();
+    cJSON_AddBoolToObject(ac_mon, "enabled", s->ac_mon.enabled);
+    cJSON_AddNumberToObject(ac_mon, "v_min", s->ac_mon.v_min);
+    cJSON_AddNumberToObject(ac_mon, "v_max", s->ac_mon.v_max);
+    cJSON_AddNumberToObject(ac_mon, "f_min", (double)s->ac_mon.f_min);
+    cJSON_AddNumberToObject(ac_mon, "f_max", (double)s->ac_mon.f_max);
+    cJSON_AddItemToObject(root, "ac_mon", ac_mon);
+
     return root;
 }
 
@@ -231,6 +256,15 @@ static void settings_from_json(const cJSON *root, system_settings_t *s, const sy
     json_get_str(root, "mqtt_client_id", s->mqtt_client_id, sizeof(s->mqtt_client_id));
     s->log_max_file_size = (uint32_t)json_get_int(root, "log_max_file_size", (int)s->log_max_file_size);
     s->log_max_files = (uint32_t)json_get_int(root, "log_max_files", (int)s->log_max_files);
+
+    const cJSON *ac_mon = cJSON_GetObjectItemCaseSensitive(root, "ac_mon");
+    if (ac_mon) {
+        s->ac_mon.enabled = json_get_bool(ac_mon, "enabled", s->ac_mon.enabled);
+        s->ac_mon.v_min = json_get_int(ac_mon, "v_min", s->ac_mon.v_min);
+        s->ac_mon.v_max = json_get_int(ac_mon, "v_max", s->ac_mon.v_max);
+        s->ac_mon.f_min = json_get_float(ac_mon, "f_min", s->ac_mon.f_min);
+        s->ac_mon.f_max = json_get_float(ac_mon, "f_max", s->ac_mon.f_max);
+    }
 }
 
 esp_err_t storage_load_config(app_config_t *cfg)
@@ -344,5 +378,64 @@ esp_err_t storage_save_config(const app_config_t *cfg)
     }
 
     ESP_LOGI(TAG, "Config saved (%d bytes)", (int)len);
+    return ESP_OK;
+}
+
+esp_err_t storage_read_raw_config(char *out, size_t out_size, size_t *out_len)
+{
+    FILE *f = fopen(CONFIG_FILE_PATH, "r");
+    if (!f) return ESP_ERR_NOT_FOUND;
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size < 0 || (size_t)size >= out_size) {
+        fclose(f);
+        return ESP_ERR_NO_MEM;
+    }
+
+    size_t rd = fread(out, 1, (size_t)size, f);
+    fclose(f);
+    out[rd] = '\0';
+    if (out_len) *out_len = rd;
+    return ESP_OK;
+}
+
+esp_err_t storage_write_raw_config(const char *json, size_t len)
+{
+    /* Cheap sanity check, not a full schema validation -- storage_load_config()
+     * already falls back to defaults on anything it can't parse/misses
+     * expected fields, so a malformed-but-JSON-shaped upload is non-
+     * destructive beyond "back to defaults", same as a corrupt config.json
+     * found at boot today. This just gives the import request itself a real
+     * error instead of a false "ok" that silently resets everything. */
+    cJSON *root = cJSON_Parse(json);
+    if (!root) return ESP_ERR_INVALID_ARG;
+    bool looks_like_config = cJSON_GetObjectItemCaseSensitive(root, "plugs") != NULL &&
+                              cJSON_GetObjectItemCaseSensitive(root, "settings") != NULL;
+    cJSON_Delete(root);
+    if (!looks_like_config) return ESP_ERR_INVALID_ARG;
+
+    const char *tmp_path = CONFIG_FILE_PATH ".tmp";
+    FILE *f = fopen(tmp_path, "w");
+    if (!f) {
+        ESP_LOGE(TAG, "Failed to open %s for writing", tmp_path);
+        return ESP_FAIL;
+    }
+    size_t written = fwrite(json, 1, len, f);
+    fclose(f);
+    if (written != len) {
+        ESP_LOGE(TAG, "Short write to config tmp file during import");
+        remove(tmp_path);
+        return ESP_FAIL;
+    }
+
+    remove(CONFIG_FILE_PATH);
+    if (rename(tmp_path, CONFIG_FILE_PATH) != 0) {
+        ESP_LOGE(TAG, "Failed to rename tmp config into place during import");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Config imported (%d bytes) -- takes effect after reboot", (int)len);
     return ESP_OK;
 }

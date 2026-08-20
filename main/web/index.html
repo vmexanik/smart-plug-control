@@ -34,6 +34,25 @@
       Логіка: 1 на вході → розетка увімкнена, 0 → вимкнена.
     <div class="inputs-list" id="inputs-tbody"></div>
 
+    <h2>AC моніторинг (ZMPT101B)</h2>
+    <p class="hint">Вимір напруги та частоти мережі. Якщо увімкнено, значення поза межами позначаються як "поза межами" в статусі нижче.</p>
+    <div id="ac-mon-status" class="status-block"></div>
+    <div class="form-grid">
+      <label><input type="checkbox" id="set-acmon-enabled"> Увімкнути моніторинг меж</label>
+      <label>Мін. напруга, В
+        <input type="number" id="set-acmon-vmin" min="100" max="300" step="1">
+      </label>
+      <label>Макс. напруга, В
+        <input type="number" id="set-acmon-vmax" min="100" max="300" step="1">
+      </label>
+      <label>Мін. частота, Гц
+        <input type="number" id="set-acmon-fmin" min="40" max="70" step="0.01">
+      </label>
+      <label>Макс. частота, Гц
+        <input type="number" id="set-acmon-fmax" min="40" max="70" step="0.01">
+      </label>
+    </div>
+
     <h2>Wi-Fi</h2>
     <div id="wifi-status" class="status-block"></div>
     <div class="form-grid">
@@ -91,6 +110,15 @@
 
     <button id="btn-save-settings" class="primary">Зберегти налаштування</button>
     <span id="settings-save-result" class="save-result"></span>
+
+    <h2>Резервна копія налаштувань</h2>
+    <p class="hint">Оновлення прошивки (OTA) переносить розділ зі збереженими розетками й налаштуваннями на нове місце у флеш-пам'яті — старі дані при цьому губляться. Збережіть копію перед оновленням, щоб потім відновити.</p>
+    <div class="toolbar">
+      <button type="button" id="btn-export-config">Експортувати (завантажити файл)</button>
+      <button type="button" id="btn-import-config">Імпортувати з файлу…</button>
+      <input type="file" id="import-config-file" accept="application/json,.json" hidden>
+    </div>
+    <span id="config-io-result" class="save-result"></span>
   </section>
 
   <section id="tab-log" class="tab-content">

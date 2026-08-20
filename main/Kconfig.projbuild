@@ -92,4 +92,26 @@ menu "Smart Plug Control"
                 implemented, see README.
     endmenu
 
+    menu "AC mains monitor (ZMPT101B)"
+        config AC_MON_VOLTS_PER_ADC_RMS_COUNT_X10000
+            int "Calibration: volts per ADC RMS count, x10000"
+            default 5500
+            range 1 1000000
+            help
+                Kconfig has no float type, so this is the real coefficient
+                multiplied by 10000 (5500 here = 0.5500). ac_monitor.c
+                divides it back down at compile time.
+
+                The ZMPT101B module's own trim pot sets its gain, so this
+                number is different for every physical board -- there is no
+                single correct default, 0.55 is only a starting guess.
+
+                To calibrate: set AC_CAL_ENABLE to 1 near the top of
+                ac_monitor.c, set AC_CAL_VRMS there to the real mains
+                voltage read off a multimeter, reflash, and read the
+                computed coefficient from the boot log ("CAL: volts_per_
+                adc_rms_count = ..."). Multiply that number by 10000, put
+                it here, set AC_CAL_ENABLE back to 0.
+    endmenu
+
 endmenu

@@ -154,10 +154,28 @@ typedef struct {
     bool enabled;      /* system setting: is this input actively listened to */
 } input_cfg_t;
 
+/* AC mains quality monitor (ac_monitor.c): a ZMPT101B module wired to a
+ * dedicated ADC-capable GPIO (not one of the inputs[] lines above -- this
+ * reads an analog waveform, not a digital level) provides RMS voltage and
+ * frequency. min/max here are the "normal" band the user expects their
+ * mains to stay within; ac_monitor.c compares each new reading against
+ * them and exposes the result (ac_mon_reading_t.in_band) for whoever wants
+ * to act on it. Voltage is whole volts (1V steps are plenty for a mains
+ * quality check); frequency keeps two decimal places since mains frequency
+ * normally only drifts by hundredths of a Hz even under real grid stress. */
+typedef struct {
+    bool  enabled;
+    int   v_min;    /* volts */
+    int   v_max;    /* volts */
+    float f_min;    /* Hz, 0.01 precision */
+    float f_max;    /* Hz, 0.01 precision */
+} ac_mon_settings_t;
+
 typedef struct {
     input_cfg_t inputs[INPUT_COUNT_PHYSICAL];
     uint32_t debounce_ms;
     uint32_t poll_interval_ms;
+    ac_mon_settings_t ac_mon;
 
     char mqtt_uri[96];         /* e.g. mqtt://user:pass@host:1883 or empty to disable */
     char mqtt_user[AUTH_LEN];

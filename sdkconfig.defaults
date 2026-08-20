@@ -4,6 +4,18 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 
+# --- OTA groundwork ---
+# partitions.csv now uses an otadata/ota_0/ota_1 layout instead of a single
+# "factory" app partition (see that file's comment for the repartition
+# caveat). This alone does not add an update-upload endpoint -- that's a
+# separate follow-up -- it just makes the flash layout OTA-capable and,
+# combined with this, makes a bad update self-heal: if a newly-flashed OTA
+# image never reaches app_main.c's esp_ota_mark_app_valid_cancel_rollback()
+# call (e.g. it crash-loops before getting there), the bootloader
+# automatically reverts to the previous working ota slot on its own instead
+# of bricking the device.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
 # --- FreeRTOS / misc ---
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

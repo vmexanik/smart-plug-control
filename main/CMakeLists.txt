@@ -15,6 +15,9 @@ idf_component_register(
         "net_scan.c"
         "fingerprint.c"
         "system_health.c"
+        "led_status.c"
+        "captive_dns.c"
+        "ac_monitor.c"
     INCLUDE_DIRS "."
     EMBED_FILES
         "web/index.html"
@@ -36,5 +39,7 @@ idf_component_register(
         esp_hw_support
         heap
         esp_system
+        app_update
+        esp_adc
 )
 

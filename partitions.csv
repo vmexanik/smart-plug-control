@@ -1,5 +1,18 @@
 # Name,     Type, SubType,  Offset,   Size,     Flags
 nvs,         data, nvs,      0x9000,   0x6000,
 phy_init,    data, phy,      0xf000,   0x1000,
-factory,     app,  factory,  0x10000,  0x180000,
-storage,     data, littlefs, 0x190000, 0x60000,
+# OTA-capable layout (was a single "factory" app partition). otadata tracks
+# which of ota_0/ota_1 to boot; the bootloader defaults to ota_0 when
+# otadata is blank/erased, so a first flash behaves exactly like the old
+# "factory" partition did. 0x180000 (1.5MB) per app slot matches the old
+# factory partition's size, comfortable headroom over the current build.
+# NOTE: this repartitions flash -- after flashing this table, the old
+# "storage" partition's bytes are at a different physical offset than
+# before, so its LittleFS contents (plug configs, event log) will NOT carry
+# over; storage_init() re-formats a blank/unrecognized LittleFS partition on
+# its own, so the device still boots fine, just with default settings. Do a
+# full `idf.py fullclean` before the next build/flash after this change.
+otadata,     data, ota,      0x10000,  0x2000,
+ota_0,       app,  ota_0,    0x20000,  0x180000,
+ota_1,       app,  ota_1,    0x1A0000, 0x180000,
+storage,     data, littlefs, 0x320000, 0x60000,

@@ -93,6 +93,13 @@ bool wifi_manager_get_scan_result(size_t index, wifi_scan_result_t *out);
  * compute which subnet to sweep. */
 bool wifi_manager_get_sta_ip_info(esp_netif_ip_info_t *out);
 
+/* Fills *out with the AP interface's IP/netmask/gw (always 192.168.4.1/24
+ * while the fallback AP is up, which per WIFI_MODE_APSTA is always -- see
+ * wifi_manager_get_status()'s doc comment). Returns false (out left
+ * untouched) only if the AP netif itself somehow isn't ready yet. Used by
+ * captive_dns.c to know which address to answer every DNS query with. */
+bool wifi_manager_get_ap_ip_info(esp_netif_ip_info_t *out);
+
 /* Fills *out with the STA interface's configured main DNS server (normally
  * handed out by the router's DHCP lease). Returns false (out left
  * untouched) if STA is not connected or no IPv4 DNS server is configured --

@@ -64,6 +64,21 @@
         .map(i => `${i.label}=${i.level ? 1 : 0}`)
         .join(', ') || 'немає активних входів';
       $('#status-bar').innerHTML = `${wifiTxt} <br> AP: ${s.wifi.ap_ip} <br> Входи: ${inputsTxt} <br> uptime ${formatUptime(s.uptime_s)}`;
+
+      const acEl = $('#ac-mon-status');
+      if (acEl && s.ac_mon) {
+        const m = s.ac_mon;
+        if (!m.have_reading) {
+          acEl.innerHTML = `<span class="hint">ще немає показань…</span>`;
+        } else if (!m.mains_present) {
+          acEl.innerHTML = `<span class="hint">сигнал не виявлено (ZMPT101B не підключено або немає мережі)</span>`;
+        } else {
+          const bandTxt = m.in_band
+            ? `<span class="good">в межах</span>`
+            : `<span class="bad">поза межами!</span>`;
+          acEl.innerHTML = `U = ${m.vrms.toFixed(1)} В, f = ${m.freq_hz.toFixed(2)} Гц — ${bandTxt}`;
+        }
+      }
     } catch (e) {
       $('#status-bar').innerHTML = `<span class="bad">Помилка статусу: ${e.message}</span>`;
     }
@@ -735,6 +750,13 @@
       $('#set-mqtt-pass').value = s.mqtt_pass;
       $('#set-log-size').value = s.log_max_file_size;
       $('#set-log-files').value = s.log_max_files;
+      if (s.ac_mon) {
+        $('#set-acmon-enabled').checked = s.ac_mon.enabled;
+        $('#set-acmon-vmin').value = s.ac_mon.v_min;
+        $('#set-acmon-vmax').value = s.ac_mon.v_max;
+        $('#set-acmon-fmin').value = s.ac_mon.f_min;
+        $('#set-acmon-fmax').value = s.ac_mon.f_max;
+      }
     } catch (e) {
       $('#settings-save-result').textContent = 'Помилка завантаження: ' + e.message;
       $('#settings-save-result').className = 'save-result error';
@@ -756,6 +778,13 @@
       mqtt_pass: $('#set-mqtt-pass').value,
       log_max_file_size: parseInt($('#set-log-size').value, 10) || 65536,
       log_max_files: parseInt($('#set-log-files').value, 10) || 5,
+      ac_mon: {
+        enabled: $('#set-acmon-enabled').checked,
+        v_min: parseInt($('#set-acmon-vmin').value, 10) || 0,
+        v_max: parseInt($('#set-acmon-vmax').value, 10) || 0,
+        f_min: parseFloat($('#set-acmon-fmin').value) || 0,
+        f_max: parseFloat($('#set-acmon-fmax').value) || 0,
+      },
     };
     const result = $('#settings-save-result');
     try {
@@ -765,6 +794,49 @@
       await loadPlugs();
     } catch (e) {
       result.textContent = 'Помилка: ' + e.message;
+      result.className = 'save-result error';
+    }
+  });
+
+  /* ---------------- config export/import ---------------- */
+  $('#btn-export-config').addEventListener('click', () => {
+    /* Plain navigation, not fetch+blob -- the server already sends
+     * Content-Disposition: attachment, so the browser handles the download
+     * on its own, no JS needed on this side. */
+    window.location.href = '/api/config/export';
+  });
+
+  $('#btn-import-config').addEventListener('click', () => {
+    $('#import-config-file').click();
+  });
+
+  $('#import-config-file').addEventListener('change', async () => {
+    const input = $('#import-config-file');
+    const file = input.files && input.files[0];
+    input.value = ''; /* so picking the same file again still fires 'change' */
+    if (!file) return;
+
+    const result = $('#config-io-result');
+    try {
+      const text = await file.text();
+      const r = await api('/api/config/import', { method: 'POST', body: text });
+      result.innerHTML = `Імпортовано. ${escapeHtml(r.detail || '')} `;
+      const btn = document.createElement('button');
+      btn.textContent = 'Перезавантажити зараз';
+      btn.className = 'primary';
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        result.textContent = 'Перезавантаження…';
+        try {
+          await api('/api/system/restart', { method: 'POST' });
+        } catch (e) {
+          /* expected -- the device drops the connection as it restarts */
+        }
+      });
+      result.appendChild(btn);
+      result.className = 'save-result';
+    } catch (e) {
+      result.textContent = 'Помилка імпорту: ' + e.message;
       result.className = 'save-result error';
     }
   });

@@ -30,6 +30,23 @@ esp_err_t storage_save_config(const app_config_t *cfg);
  * older firmware. */
 void storage_force_fixed_inputs(system_settings_t *settings);
 
+/* Reads config.json's raw bytes into out (NUL-terminated), unchanged --
+ * deliberately not a re-serialize-from-struct round trip, so an exported
+ * file is byte-identical to what's actually on flash. ESP_ERR_NOT_FOUND if
+ * nothing has ever been saved yet, ESP_ERR_NO_MEM if it doesn't fit in
+ * out_size. Used by GET /api/config/export. */
+esp_err_t storage_read_raw_config(char *out, size_t out_size, size_t *out_len);
+
+/* Validates json (must parse and contain top-level "plugs" and "settings"
+ * keys -- the shape storage_load_config()/storage_save_config() both use)
+ * and, if valid, writes it byte-for-byte to config.json (same atomic
+ * tmp-file-then-rename as storage_save_config()). Returns ESP_ERR_INVALID_ARG
+ * if json doesn't look like a config file. Does NOT touch any already-
+ * running in-memory state -- plug_manager.c loads its config once at boot,
+ * so an import only takes effect after a reboot. Used by POST
+ * /api/config/import. */
+esp_err_t storage_write_raw_config(const char *json, size_t len);
+
 #ifdef __cplusplus
 }
 #endif
