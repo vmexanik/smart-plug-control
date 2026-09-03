@@ -38,7 +38,12 @@ void storage_force_fixed_inputs(system_settings_t *settings)
     settings->inputs[0].id = INPUT_AC1;
     strncpy(settings->inputs[0].label, "AC1", sizeof(settings->inputs[0].label) - 1);
     settings->inputs[0].label[sizeof(settings->inputs[0].label) - 1] = '\0';
-    settings->inputs[0].gpio = CONFIG_INPUT_AC1_GPIO_DEFAULT;
+    /* No physical GPIO for AC1 on this board revision -- see input_id_t's
+     * comment in app_types.h. -1 makes gpio_inputs.c's poll loop and
+     * configure_gpio_input() skip it entirely (both already treat gpio < 0
+     * as "nothing to configure/poll here"); its actual trigger level comes
+     * from ac_monitor.c via plug_manager_on_ac_mon_change() instead. */
+    settings->inputs[0].gpio = -1;
 
     settings->inputs[1].id = INPUT_DC1;
     strncpy(settings->inputs[1].label, "DC1", sizeof(settings->inputs[1].label) - 1);
@@ -79,10 +84,10 @@ void storage_default_config(app_config_t *cfg)
      * meant to be tuned per-installation from the web UI, not treated as a
      * real spec. */
     cfg->settings.ac_mon.enabled = false;
-    cfg->settings.ac_mon.v_min = 200;
-    cfg->settings.ac_mon.v_max = 250;
-    cfg->settings.ac_mon.f_min = 49.00f;
-    cfg->settings.ac_mon.f_max = 51.00f;
+    cfg->settings.ac_mon.v_min = 198;
+    cfg->settings.ac_mon.v_max = 253;
+    cfg->settings.ac_mon.f_min = 49.5f;
+    cfg->settings.ac_mon.f_max = 50.5f;
 }
 
 /* ---- JSON <-> struct ---- */
@@ -95,6 +100,7 @@ static void plug_to_json(const plug_t *p, cJSON *arr)
     cJSON_AddBoolToObject(o, "enabled", p->enabled);
     cJSON_AddNumberToObject(o, "input", (int)p->input);
     cJSON_AddBoolToObject(o, "invert", p->invert);
+    cJSON_AddNumberToObject(o, "on_delay_ms", p->on_delay_ms);
     cJSON_AddNumberToObject(o, "driver", (int)p->driver);
 
     cJSON *http = cJSON_CreateObject();
@@ -161,6 +167,7 @@ static void plug_from_json(const cJSON *o, plug_t *p)
     p->enabled = json_get_bool(o, "enabled", true);
     p->input = (input_id_t)json_get_int(o, "input", INPUT_NONE);
     p->invert = json_get_bool(o, "invert", false);
+    p->on_delay_ms = (uint32_t)json_get_int(o, "on_delay_ms", 0);
     p->driver = (driver_type_t)json_get_int(o, "driver", DRIVER_HTTP);
 
     const cJSON *http = cJSON_GetObjectItemCaseSensitive(o, "http");
@@ -381,61 +388,20 @@ esp_err_t storage_save_config(const app_config_t *cfg)
     return ESP_OK;
 }
 
-esp_err_t storage_read_raw_config(char *out, size_t out_size, size_t *out_len)
+esp_err_t storage_erase_all(void)
 {
-    FILE *f = fopen(CONFIG_FILE_PATH, "r");
-    if (!f) return ESP_ERR_NOT_FOUND;
+    /* app_config_t is ~26KB (MAX_PLUGS * sizeof(plug_t)) -- same sizing
+     * note as storage_load_config()'s `defaults` local and h_plugs_get() in
+     * web_server.c. This is called from the web server's factory-reset
+     * handler, whose httpd worker stack (12288 bytes, see
+     * web_server_start()) is nowhere near big enough for a stack-local
+     * copy, so heap-allocate it -- freed right after this one-shot,
+     * user-initiated call, same as the export/import buffers above. */
+    app_config_t *defaults = malloc(sizeof(app_config_t));
+    if (!defaults) return ESP_ERR_NO_MEM;
 
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (size < 0 || (size_t)size >= out_size) {
-        fclose(f);
-        return ESP_ERR_NO_MEM;
-    }
-
-    size_t rd = fread(out, 1, (size_t)size, f);
-    fclose(f);
-    out[rd] = '\0';
-    if (out_len) *out_len = rd;
-    return ESP_OK;
-}
-
-esp_err_t storage_write_raw_config(const char *json, size_t len)
-{
-    /* Cheap sanity check, not a full schema validation -- storage_load_config()
-     * already falls back to defaults on anything it can't parse/misses
-     * expected fields, so a malformed-but-JSON-shaped upload is non-
-     * destructive beyond "back to defaults", same as a corrupt config.json
-     * found at boot today. This just gives the import request itself a real
-     * error instead of a false "ok" that silently resets everything. */
-    cJSON *root = cJSON_Parse(json);
-    if (!root) return ESP_ERR_INVALID_ARG;
-    bool looks_like_config = cJSON_GetObjectItemCaseSensitive(root, "plugs") != NULL &&
-                              cJSON_GetObjectItemCaseSensitive(root, "settings") != NULL;
-    cJSON_Delete(root);
-    if (!looks_like_config) return ESP_ERR_INVALID_ARG;
-
-    const char *tmp_path = CONFIG_FILE_PATH ".tmp";
-    FILE *f = fopen(tmp_path, "w");
-    if (!f) {
-        ESP_LOGE(TAG, "Failed to open %s for writing", tmp_path);
-        return ESP_FAIL;
-    }
-    size_t written = fwrite(json, 1, len, f);
-    fclose(f);
-    if (written != len) {
-        ESP_LOGE(TAG, "Short write to config tmp file during import");
-        remove(tmp_path);
-        return ESP_FAIL;
-    }
-
-    remove(CONFIG_FILE_PATH);
-    if (rename(tmp_path, CONFIG_FILE_PATH) != 0) {
-        ESP_LOGE(TAG, "Failed to rename tmp config into place during import");
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "Config imported (%d bytes) -- takes effect after reboot", (int)len);
-    return ESP_OK;
+    storage_default_config(defaults);
+    esp_err_t err = storage_save_config(defaults);
+    free(defaults);
+    return err;
 }

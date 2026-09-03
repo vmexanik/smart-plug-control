@@ -9,17 +9,50 @@
 extern "C" {
 #endif
 
+/* Split into two steps (netif/event-loop plumbing here, the actual Wi-Fi
+ * driver bring-up in wifi_manager_start() below) instead of one
+ * wifi_manager_init(), specifically so app_main() can create plug_manager's
+ * (and gpio_inputs'/ac_monitor's) background tasks -- fixed-size stacks
+ * totalling >20KB -- in between the two. esp_wifi_init()/esp_wifi_start()
+ * (in wifi_manager_start()) allocate the Wi-Fi driver's static+dynamic
+ * RX/TX buffers, which on this chip's internal DRAM (a scarce, non-PSRAM
+ * resource shared with everything else -- see external-RAM docs: task
+ * stacks can't simply move to PSRAM without ROM-call caveats) easily runs
+ * to 60-90KB in combined AP+STA mode. Doing that *before* plug_manager's
+ * task creation left too little internal DRAM free and plug_manager_init()
+ * failed with ESP_ERR_NO_MEM on real hardware. This function only sets up
+ * esp_netif_init()/the default event loop/the AP+STA esp_netif objects --
+ * cheap, and needed early because esp-mqtt (driver_mqtt.c, invoked from
+ * inside plug_manager_init()) requires lwIP/the event loop to already
+ * exist if a broker URI is configured, even though actually connecting
+ * doesn't require Wi-Fi to be started yet (mqtt retries on its own). */
+esp_err_t wifi_manager_init_netif(void);
+
 /*
  * Always runs Wi-Fi in APSTA mode:
  *  - AP "SmartPlug-XXXXXX" (password from Kconfig AP_FALLBACK_PASSWORD) is
  *    always on at 192.168.4.1, so the web UI is reachable even if STA
  *    credentials are missing/wrong.
  *  - STA connects using credentials stored in NVS (namespace "wifi"), if any.
- */
-esp_err_t wifi_manager_init(void);
+ *
+ * Must be called after wifi_manager_init_netif(). This is the memory-heavy
+ * half (see wifi_manager_init_netif()'s doc comment) -- call it only once
+ * the other early, internal-DRAM-hungry tasks (plug_manager/gpio_inputs/
+ * ac_monitor) already exist. */
+esp_err_t wifi_manager_start(void);
 
 /* Persists new STA credentials to NVS and (re)connects without reboot. */
 esp_err_t wifi_manager_set_credentials(const char *ssid, const char *password);
+
+/* Erases the STA credentials (SSID+password) persisted in NVS (namespace
+ * "wifi") and clears the in-memory copies, reverting the device to
+ * "no STA configured, AP-only" -- the same state as first boot. Callers
+ * that don't immediately reboot will see wifi_manager_get_status()'s
+ * ssid_out go back to empty right away; esp_wifi_disconnect()/connect()
+ * are deliberately NOT called here (unlike wifi_manager_set_credentials()),
+ * since the one caller today (POST /api/system/factory_reset in
+ * web_server.c) reboots the device immediately after. */
+esp_err_t wifi_manager_erase_credentials(void);
 
 bool wifi_manager_is_connected(void);
 

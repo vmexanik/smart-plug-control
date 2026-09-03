@@ -9,6 +9,14 @@ extern "C" {
 
 esp_err_t plug_manager_init(const app_config_t *initial_cfg);
 
+/* Starts the metrics-polling and initial-status-check background tasks --
+ * split out from plug_manager_init() deliberately so app_main() can call
+ * this only after wifi_manager_start() has already claimed its internal-DRAM
+ * buffers (see that function's doc comment). Both tasks wait for Wi-Fi
+ * before doing anything useful anyway, so nothing is lost by starting them
+ * a little later; not calling this at all just means neither ever runs. */
+esp_err_t plug_manager_start_background_tasks(void);
+
 /* Re-reads current input levels and (re)applies plug state to match them.
  * Call once shortly after boot, and any time inputs settings change. */
 void plug_manager_sync_all_from_inputs(void);
@@ -17,9 +25,10 @@ void plug_manager_sync_all_from_inputs(void);
 void plug_manager_on_input_change(input_id_t id, bool level);
 
 /* ac_monitor callback target -- see ac_mon_change_cb_t in ac_monitor.h.
- * Gates AC1-bound plugs off when mains goes out of the configured
- * voltage/frequency band (and enabled), re-syncs them to the AC1 input's
- * current level when it comes back in band. */
+ * AC1 has no physical GPIO on this board revision: this IS the AC1 input's
+ * level (see input_id_t's comment in app_types.h) -- in_band drives every
+ * AC1-bound plug directly (^ its own invert flag), on every actual
+ * in-band/out-of-band transition. */
 void plug_manager_on_ac_mon_change(bool in_band);
 
 /* ---- Plug CRUD (thread-safe, persists to flash on every mutation) ---- */

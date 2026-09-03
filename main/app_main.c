@@ -126,7 +126,45 @@ void app_main(void)
     }
     BOOT_WDT_STEP();
 
-    ESP_ERROR_CHECK(wifi_manager_init());
+    /* Netif/event-loop plumbing only (cheap) -- the memory-heavy Wi-Fi
+     * driver bring-up (wifi_manager_start(), below) is deliberately
+     * deferred until after plug_manager_init()/gpio_inputs_init()/
+     * ac_monitor_init() have created their background tasks. Splitting it
+     * this way (see wifi_manager.h) is what fixes a real ESP_ERR_NO_MEM
+     * failure in plug_manager_init() seen on hardware: esp_wifi_init()+
+     * esp_wifi_start() in combined AP+STA mode can eat 60-90KB of internal
+     * DRAM for driver RX/TX buffers, which used to run *before*
+     * plug_manager's >20KB of task stacks and left too little free. */
+    ESP_ERROR_CHECK(wifi_manager_init_netif());
+    BOOT_WDT_STEP();
+
+    ESP_ERROR_CHECK(plug_manager_init(&cfg));
+    BOOT_WDT_STEP();
+
+    ESP_ERROR_CHECK(gpio_inputs_init(&cfg.settings, plug_manager_on_input_change));
+    BOOT_WDT_STEP();
+
+    /* AC mains voltage/frequency monitor (ZMPT101B on GPIO7/ADC1_CH6) --
+     * not treated as fatal if it fails to start: this is an optional
+     * sensor, most of the firmware works fine without it. */
+    if (ac_monitor_init(&cfg.settings.ac_mon, plug_manager_on_ac_mon_change) != ESP_OK) {
+        ESP_LOGW(TAG, "could not start AC mains monitor");
+    }
+    BOOT_WDT_STEP();
+
+    /* Now the expensive half: brings up the Wi-Fi driver, AP, and STA
+     * connection attempt. */
+    ESP_ERROR_CHECK(wifi_manager_start());
+    BOOT_WDT_STEP();
+
+    /* metrics_poll_task/initial_status_task -- see plug_manager.h's doc
+     * comment on why these wait until after Wi-Fi's own internal-DRAM
+     * buffers are already allocated. Not treated as fatal: metrics
+     * polling and the boot-time status re-check are both nice-to-haves,
+     * not required for basic on/off control. */
+    if (plug_manager_start_background_tasks() != ESP_OK) {
+        ESP_LOGW(TAG, "could not start plug_manager background tasks (metrics/initial status)");
+    }
     BOOT_WDT_STEP();
 
     /* Captive-portal DNS hijack for the fallback AP -- see captive_dns.h.
@@ -142,20 +180,6 @@ void app_main(void)
      * STA has an IP (or never, if AP-only -- the web UI's manual time set
      * via POST /api/time covers that case). */
     time_sync_init(CONFIG_NTP_SERVER_DEFAULT);
-
-    ESP_ERROR_CHECK(plug_manager_init(&cfg));
-    BOOT_WDT_STEP();
-
-    ESP_ERROR_CHECK(gpio_inputs_init(&cfg.settings, plug_manager_on_input_change));
-    BOOT_WDT_STEP();
-
-    /* AC mains voltage/frequency monitor (ZMPT101B on GPIO7/ADC1_CH6) --
-     * not treated as fatal if it fails to start: this is an optional
-     * sensor, most of the firmware works fine without it. */
-    if (ac_monitor_init(&cfg.settings.ac_mon, plug_manager_on_ac_mon_change) != ESP_OK) {
-        ESP_LOGW(TAG, "could not start AC mains monitor");
-    }
-    BOOT_WDT_STEP();
 
     ESP_ERROR_CHECK(net_scan_init());
     BOOT_WDT_STEP();

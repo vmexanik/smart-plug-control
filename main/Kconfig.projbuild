@@ -2,11 +2,12 @@ menu "Smart Plug Control"
 
     menu "Default trigger input GPIOs"
         comment "Runtime web UI can change enable/disable and invert; these are the physical pin defaults on first boot."
-        comment "Defaults below target ESP32-S3-WROOM-1-N16R8 (Octal PSRAM). If building for a classic ESP32-WROOM-32 instead, GPIO34/35/32 (input-only, no pull resistor) are the traditional choice there and remain valid -- just change these three back."
+        comment "Defaults below target ESP32-S3-WROOM-1-N16R8 (Octal PSRAM). If building for a classic ESP32-WROOM-32 instead, GPIO34/35/32 (input-only, no pull resistor) are the traditional choice there and remain valid -- just change these back."
+        comment "AC1 is NOT in this list -- it has no physical GPIO on this board revision. AC1 is a virtual trigger driven entirely by the AC mains monitor's in-band status (see the 'AC mains monitor (ZMPT101B)' menu below and ac_monitor.c/plug_manager.c) -- its wiring is analog only (ZMPT101B -> ADC pin), there is no separate digital opto line for it any more."
 
-        config INPUT_AC1_GPIO_DEFAULT
-            int "AC1 default GPIO"
-            default 4
+        config INPUT_DC1_GPIO_DEFAULT
+            int "DC1 default GPIO"
+            default 7
             range 0 48
             help
                 On ESP32-S3-WROOM-1 with Octal PSRAM (the "R8" modules,
@@ -16,14 +17,9 @@ menu "Smart Plug Control"
                 here. GPIO4-18, 21, 38-42, 47, 48 are free. (On classic
                 ESP32-WROOM-32 the valid range is 0-39, input-only above 34.)
 
-        config INPUT_DC1_GPIO_DEFAULT
-            int "DC1 default GPIO"
-            default 5
-            range 0 48
-
         config INPUT_DC2_GPIO_DEFAULT
             int "DC2 default GPIO"
-            default 6
+            default 2
             range 0 48
 
         config INPUT_DEBOUNCE_MS_DEFAULT
@@ -93,6 +89,27 @@ menu "Smart Plug Control"
     endmenu
 
     menu "AC mains monitor (ZMPT101B)"
+        config AC_MON_ADC_GPIO_DEFAULT
+            int "AC mains monitor ADC input GPIO (this is the 'AC1' pin)"
+            default 11
+            range 1 20
+            help
+                ESP32-S3 ADC-capable pins split into two independent units:
+                GPIO1-10 = ADC1 (channel = GPIO - 1), GPIO11-20 = ADC2
+                (channel = GPIO - 11). ac_monitor.c derives the right
+                adc_unit_t/adc_channel_t from whichever GPIO you set here,
+                at compile time.
+
+                Strongly prefer an ADC1 pin (GPIO1-10) if you have the
+                choice: ADC2 is shared with the Wi-Fi radio, and Wi-Fi is
+                always active on this device, so continuous-mode ADC2
+                sampling (used here) can be delayed or glitched by radio
+                activity -- readings may be noisier or occasionally miss a
+                window. Using GPIO11 (ADC2 channel 0) here is a known,
+                accepted tradeoff for this board revision (physical AC1 net
+                is already routed there) -- ac_monitor.c logs a warning at
+                boot when this resolves to an ADC2 pin.
+
         config AC_MON_VOLTS_PER_ADC_RMS_COUNT_X10000
             int "Calibration: volts per ADC RMS count, x10000"
             default 5500
@@ -112,6 +129,18 @@ menu "Smart Plug Control"
                 computed coefficient from the boot log ("CAL: volts_per_
                 adc_rms_count = ..."). Multiply that number by 10000, put
                 it here, set AC_CAL_ENABLE back to 0.
+    endmenu
+
+    menu "Status LED"
+        config LED_STATUS_GPIO_DEFAULT
+            int "Status LED GPIO"
+            default 12
+            range 0 48
+            help
+                Blinks once per second (500ms on/off) for as long as the
+                firmware is alive -- see led_status.c. Free, general-purpose
+                GPIO, not shared with flash/PSRAM, USB-JTAG, console UART or
+                any strapping pin.
     endmenu
 
 endmenu

@@ -16,13 +16,33 @@ static const char *TAG = "ac_monitor";
 /* Wiring / hardware                                                    */
 /* ------------------------------------------------------------------ */
 
-/* GPIO7 = ADC1_CH6 on ESP32-S3-WROOM-1-N16R8 (see the module datasheet --
- * this is the free ADC1 pin recommended alongside AC1/DC1/DC2 = GPIO4/5/6).
- * ADC1, not ADC2 -- ADC2 shares hardware with the Wi-Fi driver and gives
- * unreliable readings while Wi-Fi is active, which on this device is
- * always. */
-#define AC_MON_ADC_UNIT     ADC_UNIT_1
-#define AC_MON_ADC_CHANNEL  ADC_CHANNEL_6
+/* Which physical GPIO the ZMPT101B output is wired to -- this IS the "AC1"
+ * pin (see input_id_t's comment in app_types.h: AC1 has no separate digital
+ * line, only this analog one). Configurable via Kconfig (menuconfig ->
+ * Smart Plug Control -> AC mains monitor (ZMPT101B)), same pattern as
+ * DC1/DC2's GPIOs in Kconfig.projbuild.
+ *
+ * ESP32-S3 ADC-capable pins split into two independent units: GPIO1-10 =
+ * ADC1 (channel = GPIO - 1), GPIO11-20 = ADC2 (channel = GPIO - 11). ADC1
+ * is strongly preferred when there's a choice -- ADC2 shares hardware with
+ * the Wi-Fi radio and can give delayed/noisier readings while Wi-Fi is
+ * active, which on this device is always. CONFIG_AC_MON_ADC_GPIO_DEFAULT
+ * resolves to whichever unit/channel/conv_mode its value falls into, at
+ * compile time; a build-time #error catches anything outside GPIO1-20. */
+#define AC_MON_ADC_GPIO CONFIG_AC_MON_ADC_GPIO_DEFAULT
+
+#if AC_MON_ADC_GPIO >= 1 && AC_MON_ADC_GPIO <= 10
+#define AC_MON_ADC_UNIT       ADC_UNIT_1
+#define AC_MON_ADC_CHANNEL    (AC_MON_ADC_GPIO - 1)
+#define AC_MON_ADC_CONV_MODE  ADC_CONV_SINGLE_UNIT_1
+#elif AC_MON_ADC_GPIO >= 11 && AC_MON_ADC_GPIO <= 20
+#define AC_MON_ADC_UNIT       ADC_UNIT_2
+#define AC_MON_ADC_CHANNEL    (AC_MON_ADC_GPIO - 11)
+#define AC_MON_ADC_CONV_MODE  ADC_CONV_SINGLE_UNIT_2
+#else
+#error "CONFIG_AC_MON_ADC_GPIO_DEFAULT must be an ADC-capable ESP32-S3 GPIO (1-20)"
+#endif
+
 #define AC_MON_ADC_ATTEN    ADC_ATTEN_DB_12 /* full ~0-3.3V input range */
 #define AC_MON_ADC_BITWIDTH SOC_ADC_DIGI_MAX_BITWIDTH /* 12-bit on S3: 0-4095 counts */
 
@@ -272,7 +292,7 @@ esp_err_t ac_monitor_init(const ac_mon_settings_t *settings, ac_mon_change_cb_t 
     };
     adc_continuous_config_t dig_cfg = {
         .sample_freq_hz = SAMPLE_RATE_HZ,
-        .conv_mode = ADC_CONV_SINGLE_UNIT_1,
+        .conv_mode = AC_MON_ADC_CONV_MODE,
         .pattern_num = 1,
         .adc_pattern = pattern,
     };
@@ -310,7 +330,20 @@ esp_err_t ac_monitor_init(const ac_mon_settings_t *settings, ac_mon_change_cb_t 
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "AC mains monitor started (ADC1_CH6 / GPIO7, %d Hz sample rate)", SAMPLE_RATE_HZ);
+    /* Runtime check, not #if -- AC_MON_ADC_UNIT/ADC_UNIT_2 are C enum
+     * constants, not preprocessor macros, so a #if comparing them would
+     * silently evaluate both sides as 0 (any identifier the preprocessor
+     * doesn't know is replaced with 0 in a #if) and always take this
+     * branch regardless of the actual pin. */
+    if (AC_MON_ADC_UNIT == ADC_UNIT_2) {
+        ESP_LOGW(TAG, "AC mains monitor on GPIO%d uses ADC2, which is shared with the "
+                      "Wi-Fi radio -- readings may be delayed or noisier while Wi-Fi is "
+                      "active (always, on this device). Prefer an ADC1 pin (GPIO1-10) "
+                      "if the board allows it.", AC_MON_ADC_GPIO);
+    }
+    ESP_LOGI(TAG, "AC mains monitor started (GPIO%d, ADC%d_CH%d, %d Hz sample rate)",
+             AC_MON_ADC_GPIO, (AC_MON_ADC_UNIT == ADC_UNIT_1) ? 1 : 2,
+             (int)AC_MON_ADC_CHANNEL, SAMPLE_RATE_HZ);
     return ESP_OK;
 }
 

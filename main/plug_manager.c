@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -166,15 +167,46 @@ static void worker_task(void *arg)
 
 static void metrics_poll_task(void *arg)
 {
-    /* static, not a local array: MAX_PLUGS * sizeof(plug_t) is easily a few
-     * KB, and this project has already hit one hard-to-diagnose stack
-     * overflow from underestimating an esp_http_client-adjacent task's
-     * stack needs (see README) -- not repeating that mistake by putting a
-     * big buffer on top of it. */
-    static plug_t snapshot[MAX_PLUGS];
+    /* Heap-allocated once here, not `static`: a `static` MAX_PLUGS *
+     * sizeof(plug_t) buffer (~28KB) sits in internal DRAM .bss for the
+     * firmware's entire lifetime, and combined with initial_status_task()'s
+     * identical buffer below was enough on its own to overflow the DRAM
+     * segment at link time ("DRAM segment data does not fit"). 28KB is
+     * over CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL (16384), so this malloc is
+     * satisfied from PSRAM instead (megabytes free) -- same reasoning as
+     * h_plugs_get()'s malloc in web_server.c. Allocated once, up front, not
+     * inside the for(;;) loop below, so this behaves exactly like the old
+     * static buffer except for which heap it lives on. Still not a
+     * stack-local either -- this project has already hit one
+     * hard-to-diagnose stack overflow from underestimating an
+     * esp_http_client-adjacent task's stack needs (see README). */
+    plug_t *snapshot = malloc(sizeof(plug_t) * MAX_PLUGS);
+    if (!snapshot) {
+        ESP_LOGE(TAG, "metrics_poll_task: out of memory allocating snapshot buffer, task exiting");
+        vTaskDelete(NULL);
+        return;
+    }
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(METRICS_POLL_INTERVAL_MS));
+
+        /* Skip the whole round while STA isn't connected -- otherwise every
+         * HTTP plug fails its query the slow way (each of driver_http.c's
+         * esp_http_client calls has to run out its 3-5s connect timeout
+         * before giving up), so a round can take longer than
+         * METRICS_POLL_INTERVAL_MS itself and the task ends up running
+         * back-to-back forever, each failure logged. That's not just a
+         * transient boot-time thing: it's the steady state for as long as
+         * STA is down -- Wi-Fi not yet configured, AP out of range, or the
+         * password changed at the router -- since plugs stay saved in
+         * config.json independently of the Wi-Fi STA credentials in NVS
+         * (see wifi_manager.c). initial_status_task() below already waits
+         * on wifi_manager_is_connected() once at boot for the same reason;
+         * this is that same guard applied every cycle, not just the
+         * first. */
+        if (!wifi_manager_is_connected()) {
+            continue;
+        }
 
         /* Snapshot the plugs worth polling under lock, then do all the
          * (blocking, potentially slow) HTTP calls with no lock held --
@@ -300,8 +332,9 @@ static void initial_status_task(void *arg)
     (void)arg;
 
     /* This task starts well before STA association+DHCP can plausibly be
-     * done (wifi_manager_init() only kicks off the connection attempt, it
-     * doesn't block on it), so wait for a real connection first -- up to a
+     * done (wifi_manager_start(), called after plug_manager_init(), only
+     * kicks off the connection attempt, it doesn't block on it), so wait
+     * for a real connection first -- up to a
      * bounded timeout, and bailing out early if the STA config itself is
      * bad (wrong password etc., see wifi_manager_sta_config_error()) since
      * that's never going to resolve on its own. Skipping both halves of
@@ -331,8 +364,19 @@ static void initial_status_task(void *arg)
     }
 
     /* Same snapshot-under-lock / network-call-outside-lock / update-under-
-     * lock discipline as metrics_poll_task() and plug_manager_add(). */
-    static plug_t snapshot[MAX_PLUGS];
+     * lock discipline as metrics_poll_task() and plug_manager_add().
+     * Heap-allocated (freed just before this task deletes itself, at the
+     * bottom of this function), not `static` -- see metrics_poll_task()'s
+     * comment: a `static` buffer here sat in internal DRAM permanently for
+     * a task that only ever runs once at boot, and combined with
+     * metrics_poll_task()'s own (formerly-static) same-sized buffer was
+     * enough to overflow the DRAM segment at link time. */
+    plug_t *snapshot = malloc(sizeof(plug_t) * MAX_PLUGS);
+    if (!snapshot) {
+        ESP_LOGE(TAG, "initial status check: out of memory allocating snapshot buffer, skipping");
+        vTaskDelete(NULL);
+        return;
+    }
     size_t n = 0;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     for (size_t i = 0; i < s_cfg.plug_count; i++) {
@@ -373,6 +417,7 @@ static void initial_status_task(void *arg)
      * does when called after an inputs-tab settings save. */
     plug_manager_sync_all_from_inputs();
 
+    free(snapshot);
     vTaskDelete(NULL);
 }
 
@@ -382,6 +427,103 @@ static void enqueue_action(uint32_t plug_id, bool on, const char *source)
     strncpy(act.source, source, sizeof(act.source) - 1);
     if (xQueueSend(s_action_queue, &act, 0) != pdTRUE) {
         ESP_LOGW(TAG, "action queue full, dropping command for plug %u", (unsigned)plug_id);
+    }
+}
+
+/* Anti-chatter turn-ON delay sweep interval (see on_delay_task() below).
+ * Short enough to keep the extra ON latency it adds negligible next to
+ * typical on_delay_ms values (hundreds of ms to a few seconds), long
+ * enough not to be a meaningful CPU/lock-contention cost sitting in the
+ * background forever. */
+#define ON_DELAY_SWEEP_INTERVAL_MS 50
+#define ON_DELAY_TASK_STACK        3072
+
+/* Applies a computed desired on/off state to one plug (targets[]/desired[]
+ * entries from plug_manager_on_input_change()/plug_manager_sync_all_from_
+ * inputs()/plug_manager_on_ac_mon_change() below), honoring that plug's
+ * anti-chatter on_delay_ms (see app_types.h's doc comment on it): OFF is
+ * always dispatched immediately -- turning off must never be held up, both
+ * for safety and because that's the whole point of this feature ("вимикається
+ * миттєво, вмикається з таймаутом"). ON is dispatched immediately only when
+ * on_delay_ms == 0 (i.e. the feature is off for this plug, same behavior as
+ * before it existed); otherwise it's deferred by recording a deadline that
+ * on_delay_task() below picks up once it elapses.
+ *
+ * Called with no lock held (same discipline as enqueue_action()); takes
+ * s_lock itself only for the bookkeeping. desired_on here is already the
+ * *post-inversion* result (`level ^ invert`, computed by every caller before
+ * reaching this function) -- that's what makes this delay automatically
+ * inversion-aware without any separate handling: it always delays whichever
+ * physical edge `invert` maps to "this plug should be on", never the other
+ * one, regardless of how `invert` is set. */
+static void apply_desired_state(uint32_t plug_id, bool desired_on, const char *source)
+{
+    if (!desired_on) {
+        /* Cancel any delayed ON still pending for this plug -- an input
+         * settling back to "off" before its delayed ON ever fired must win
+         * outright, not race it once on_delay_task() next wakes up. */
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        int idx = find_index_locked(plug_id);
+        if (idx >= 0) s_cfg.plugs[idx].on_delay_due_us = 0;
+        xSemaphoreGive(s_lock);
+        enqueue_action(plug_id, false, source);
+        return;
+    }
+
+    bool have_plug = false;
+    uint32_t delay_ms = 0;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    int idx = find_index_locked(plug_id);
+    if (idx >= 0) {
+        have_plug = true;
+        delay_ms = s_cfg.plugs[idx].on_delay_ms;
+        if (delay_ms > 0) {
+            s_cfg.plugs[idx].on_delay_due_us = esp_timer_get_time() + (int64_t)delay_ms * 1000;
+            strncpy(s_cfg.plugs[idx].on_delay_source, source, sizeof(s_cfg.plugs[idx].on_delay_source) - 1);
+            s_cfg.plugs[idx].on_delay_source[sizeof(s_cfg.plugs[idx].on_delay_source) - 1] = '\0';
+        }
+    }
+    xSemaphoreGive(s_lock);
+
+    if (!have_plug) return; /* plug vanished (deleted) between snapshot and here */
+
+    if (delay_ms == 0) {
+        enqueue_action(plug_id, true, source);
+    }
+    /* else: deferred -- on_delay_task() enqueues it once its deadline is reached. */
+}
+
+/* Background sweep for apply_desired_state()'s deferred ONs above. A plain
+ * periodic poll (same style as metrics_poll_task's interval-based loop)
+ * rather than one esp_timer per plug -- simpler lifecycle (nothing to
+ * create/destroy as plugs are added/deleted/edited) at the cost of up to
+ * ON_DELAY_SWEEP_INTERVAL_MS of extra latency on top of the configured
+ * on_delay_ms, which is negligible for this feature's purpose. */
+static void on_delay_task(void *arg)
+{
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(ON_DELAY_SWEEP_INTERVAL_MS));
+
+        uint32_t due_ids[MAX_PLUGS];
+        char due_sources[MAX_PLUGS][16];
+        size_t n = 0;
+
+        int64_t now = esp_timer_get_time();
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        for (size_t i = 0; i < s_cfg.plug_count; i++) {
+            plug_t *p = &s_cfg.plugs[i];
+            if (p->on_delay_due_us != 0 && now >= p->on_delay_due_us) {
+                due_ids[n] = p->id;
+                memcpy(due_sources[n], p->on_delay_source, sizeof(due_sources[n]));
+                n++;
+                p->on_delay_due_us = 0;
+            }
+        }
+        xSemaphoreGive(s_lock);
+
+        for (size_t i = 0; i < n; i++) {
+            enqueue_action(due_ids[i], true, due_sources[i]);
+        }
     }
 }
 
@@ -402,6 +544,7 @@ esp_err_t plug_manager_init(const app_config_t *initial_cfg)
         memset(&s_cfg.plugs[i].metrics, 0, sizeof(s_cfg.plugs[i].metrics));
         s_cfg.plugs[i].metrics_updated_us = 0;
         s_cfg.plugs[i].reachable = true; /* optimistic until the first poll/command says otherwise */
+        s_cfg.plugs[i].on_delay_due_us = 0; /* no delayed ON survives a reboot -- see app_types.h */
     }
     s_next_id = max_id + 1;
 
@@ -423,6 +566,36 @@ esp_err_t plug_manager_init(const app_config_t *initial_cfg)
     BaseType_t ok = xTaskCreate(worker_task, "plug_worker", 12288, NULL, 5, NULL);
     if (ok != pdPASS) return ESP_ERR_NO_MEM;
 
+    /* Anti-chatter ON-delay sweep (see apply_desired_state()/on_delay_task()
+     * above) -- lightweight and network-independent, so it can start right
+     * away here alongside worker_task rather than waiting for
+     * plug_manager_start_background_tasks() like the Wi-Fi-dependent
+     * metrics/initial-status tasks do. */
+    BaseType_t okd = xTaskCreate(on_delay_task, "plug_on_delay", ON_DELAY_TASK_STACK, NULL, 4, NULL);
+    if (okd != pdPASS) return ESP_ERR_NO_MEM;
+
+    /* metrics_poll_task and initial_status_task are deliberately NOT started
+     * here -- see plug_manager_start_background_tasks() below, called
+     * separately from app_main() only after wifi_manager_start() has already
+     * claimed its share of internal DRAM. Both of them are 12288B-stack
+     * esp_http_client-calling tasks whose very first action is to sit and
+     * wait for Wi-Fi anyway (metrics_poll_task's own 10s initial vTaskDelay;
+     * initial_status_task's explicit wifi_manager_is_connected() wait loop),
+     * so there's nothing lost by not having their stacks allocated yet at
+     * this point -- but there used to be a real cost: creating them here,
+     * before Wi-Fi came up, meant their combined 24KB+ sat there occupied
+     * for the whole rest of boot, competing with esp_wifi_init()'s own
+     * internal-DRAM buffer allocation and starving it (ESP_ERR_NO_MEM on
+     * real hardware -- see wifi_manager.h's doc comment on the netif/start
+     * split for the matching half of this fix). */
+
+    driver_mqtt_apply_settings(&s_cfg.settings);
+
+    return ESP_OK;
+}
+
+esp_err_t plug_manager_start_background_tasks(void)
+{
     /* Lower priority than worker_task -- background metering polls should
      * never delay an actual on/off command. */
     BaseType_t okm = xTaskCreate(metrics_poll_task, "plug_metrics", METRICS_POLL_TASK_STACK, NULL, 3, NULL);
@@ -437,28 +610,30 @@ esp_err_t plug_manager_init(const app_config_t *initial_cfg)
         ESP_LOGW(TAG, "could not start initial status check task, saved plugs keep default state");
     }
 
-    driver_mqtt_apply_settings(&s_cfg.settings);
-
     return ESP_OK;
 }
 
-/* AC1-bound plugs get an extra safety gate on top of the normal
- * level^invert logic: if AC mains monitoring is enabled and the last AC
- * monitor reading was out of the configured voltage/frequency band, force
- * the plug off regardless of what the AC1 digital input itself says --
- * out-of-band mains is exactly the situation an AC1-triggered plug (e.g.
- * "turn on when mains is present") should NOT be energized in. Caller must
- * already hold s_lock. */
-static bool gate_ac1(const plug_t *p, bool want)
+/* AC1 has no physical GPIO on this board revision (see input_id_t's comment
+ * in app_types.h) -- its logical "level" is the AC mains monitor's in-band
+ * status directly: active exactly when the last ZMPT101B reading's voltage
+ * AND frequency are within the configured ac_mon band (process_window() in
+ * ac_monitor.c already folds "monitoring disabled" / "no signal yet" into
+ * in_band == true, so an AC1-bound plug just behaves as "always on" until
+ * the user enables AC mains monitoring from the web UI). DC1/DC2 read their
+ * level from gpio_inputs.c as before. Caller must hold s_lock (s_ac_mon_in_band
+ * is guarded by it, same as s_cfg). */
+static bool input_level_locked(input_id_t id)
 {
-    if (p->input != INPUT_AC1) return want;
-    if (!s_cfg.settings.ac_mon.enabled) return want;
-    if (!s_ac_mon_in_band) return false;
-    return want;
+    if (id == INPUT_AC1) return s_ac_mon_in_band;
+    return gpio_inputs_get_level(id);
 }
 
 void plug_manager_on_input_change(input_id_t id, bool level)
 {
+    /* Only ever called for DC1/DC2 -- gpio_inputs.c never polls or reports
+     * a change for AC1 (its inputs[] slot is gpio = -1, skipped outright by
+     * gpio_inputs.c's poll loop). AC1-bound plugs are driven exclusively by
+     * plug_manager_on_ac_mon_change() below. */
     xSemaphoreTake(s_lock, portMAX_DELAY);
     uint32_t targets[MAX_PLUGS];
     bool desired[MAX_PLUGS];
@@ -467,13 +642,13 @@ void plug_manager_on_input_change(input_id_t id, bool level)
         plug_t *p = &s_cfg.plugs[i];
         if (!p->enabled || p->input != id) continue;
         targets[n] = p->id;
-        desired[n] = gate_ac1(p, level ^ p->invert);
+        desired[n] = level ^ p->invert;
         n++;
     }
     xSemaphoreGive(s_lock);
 
     for (size_t i = 0; i < n; i++) {
-        enqueue_action(targets[i], desired[i], LOG_SRC_INPUT);
+        apply_desired_state(targets[i], desired[i], LOG_SRC_INPUT);
     }
 }
 
@@ -487,24 +662,24 @@ void plug_manager_sync_all_from_inputs(void)
         plug_t *p = &s_cfg.plugs[i];
         if (!p->enabled || p->input == INPUT_NONE) continue;
         if (!gpio_inputs_is_enabled(p->input)) continue;
-        bool level = gpio_inputs_get_level(p->input);
+        bool level = input_level_locked(p->input);
         targets[n] = p->id;
-        desired[n] = gate_ac1(p, level ^ p->invert);
+        desired[n] = level ^ p->invert;
         n++;
     }
     xSemaphoreGive(s_lock);
 
     for (size_t i = 0; i < n; i++) {
-        enqueue_action(targets[i], desired[i], LOG_SRC_BOOT);
+        apply_desired_state(targets[i], desired[i], LOG_SRC_BOOT);
     }
 }
 
 /* ac_monitor.c callback target -- fired only on an actual in-band/out-of-band
  * transition (see ac_monitor.h). Re-evaluates every AC1-bound plug against
- * the new status: going out of band force-drops them (see gate_ac1() above),
- * coming back in band re-applies whatever the AC1 input itself currently
- * says. Plugs bound to other inputs, or not bound to any input, are
- * untouched -- this is deliberately scoped to AC1 only, same as
+ * the new in_band status (see input_level_locked() above -- that IS the
+ * AC1 level now, there's no separate physical line to combine it with).
+ * Plugs bound to other inputs, or not bound to any input, are untouched --
+ * this is deliberately scoped to AC1 only, same as
  * plug_manager_on_input_change()'s own per-input filtering. */
 void plug_manager_on_ac_mon_change(bool in_band)
 {
@@ -517,15 +692,14 @@ void plug_manager_on_ac_mon_change(bool in_band)
         plug_t *p = &s_cfg.plugs[i];
         if (!p->enabled || p->input != INPUT_AC1) continue;
         if (!gpio_inputs_is_enabled(p->input)) continue;
-        bool level = gpio_inputs_get_level(p->input);
         targets[n] = p->id;
-        desired[n] = gate_ac1(p, level ^ p->invert);
+        desired[n] = in_band ^ p->invert;
         n++;
     }
     xSemaphoreGive(s_lock);
 
     for (size_t i = 0; i < n; i++) {
-        enqueue_action(targets[i], desired[i], LOG_SRC_AC_MON);
+        apply_desired_state(targets[i], desired[i], LOG_SRC_AC_MON);
     }
 }
 

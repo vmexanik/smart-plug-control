@@ -190,6 +190,7 @@ static cJSON *plug_to_json(const plug_t *p)
     cJSON_AddBoolToObject(o, "enabled", p->enabled);
     cJSON_AddStringToObject(o, "input", input_label(p->input));
     cJSON_AddBoolToObject(o, "invert", p->invert);
+    cJSON_AddNumberToObject(o, "on_delay_ms", p->on_delay_ms);
     cJSON_AddStringToObject(o, "driver", driver_label(p->driver));
 
     cJSON *http = cJSON_CreateObject();
@@ -243,6 +244,16 @@ static void plug_from_json(const cJSON *o, plug_t *p)
     jget_str(o, "input", input_str, sizeof(input_str));
     p->input = input_from_label(input_str);
     p->invert = jget_bool(o, "invert", false);
+
+    /* Clamped to a sane range rather than trusted verbatim from the request
+     * body -- 0 (off) is valid and the default; 60000ms (60s) is a generous
+     * upper bound for a relay anti-chatter delay, well past anything a real
+     * installation would need, just enough to stop a typo/garbage value
+     * from making a plug appear to "never turn on". */
+    int on_delay = jget_int(o, "on_delay_ms", 0);
+    if (on_delay < 0) on_delay = 0;
+    if (on_delay > 60000) on_delay = 60000;
+    p->on_delay_ms = (uint32_t)on_delay;
 
     char driver_str[8];
     jget_str(o, "driver", driver_str, sizeof(driver_str));
@@ -341,7 +352,7 @@ static esp_err_t h_favicon(httpd_req_t *req)
  * *any* redirect reads as "there's a portal, go there" across the board).
  * Paired with captive_dns.c (resolves every hostname an AP client looks up,
  * including whatever domain each OS's probe targets, to this device's own
- * IP) and wifi_manager_init()'s AP DHCP DNS option (what points those
+ * IP) and wifi_manager_start()'s AP DHCP DNS option (what points those
  * lookups here in the first place) -- see captive_dns.h for the full
  * chain. Relative Location works fine even though the client thinks it's
  * talking to some public hostname (e.g. connectivitycheck.gstatic.com):
@@ -362,7 +373,22 @@ static esp_err_t h_captive_redirect(httpd_req_t *req)
 static esp_err_t h_plugs_get(httpd_req_t *req)
 {
     /* plug_t plugs[MAX_PLUGS] would be ~26KB -- too big for the httpd
-     * worker task's stack, so this is heap-allocated instead. */
+     * worker task's stack, so this is heap-allocated instead.
+     *
+     * Deliberately NOT `static` here (unlike plug_manager.c's
+     * metrics_poll_task, which uses a static same-sized snapshot buffer):
+     * this project builds with CONFIG_SPIRAM_USE_MALLOC=y and
+     * CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY unset, so a `static`
+     * array here would sit in internal DRAM .bss permanently, not PSRAM --
+     * and internal free heap on this device runs chronically in the
+     * 24-27KB band (see the heartbeat log), so a second ~26KB static
+     * reservation on top of metrics_poll_task's existing one would eat
+     * further into an already-tight budget the Wi-Fi/lwIP stack also
+     * needs, for no benefit. A plain malloc() this size (> the 16KB
+     * CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL cutoff, and internal free is
+     * already below the 32KB CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL
+     * margin) is satisfied from PSRAM instead, which has megabytes of
+     * headroom -- leaving the scarce internal heap alone. */
     plug_t *plugs = (plug_t *)malloc(sizeof(plug_t) * MAX_PLUGS);
     if (!plugs) return send_error(req, 500, "out of memory");
 
@@ -593,49 +619,8 @@ static esp_err_t h_settings_post(httpd_req_t *req)
 }
 
 /* ---------------------------------------------------------------------- */
-/* /api/config/export, /api/config/import, /api/system/restart             */
+/* /api/system/restart                                                     */
 /* ---------------------------------------------------------------------- */
-
-/* config.json can hold up to MAX_PLUGS(32) plugs plus settings -- storage.c
- * itself caps a loadable config.json at 64KB (see storage_load_config()),
- * so that's the natural size here too. Static, not a stack local: the httpd
- * worker task's stack (12288B, see web_server_start()) is generous for
- * short-lived JSON bodies elsewhere in this file, but nowhere near 64KB. */
-#define CONFIG_TRANSFER_BUF_SIZE 65536
-static char s_config_transfer_buf[CONFIG_TRANSFER_BUF_SIZE];
-
-static esp_err_t h_config_export(httpd_req_t *req)
-{
-    size_t len = 0;
-    esp_err_t err = storage_read_raw_config(s_config_transfer_buf, sizeof(s_config_transfer_buf), &len);
-    if (err == ESP_ERR_NOT_FOUND) return send_error(req, 404, "no config saved yet");
-    if (err != ESP_OK) return send_error(req, 500, "config too large to export");
-
-    httpd_resp_set_type(req, "application/json");
-    /* Prompts the browser to download it as a file instead of navigating to
-     * it -- the whole point of "export" is a file the user can keep
-     * somewhere safe, e.g. before an OTA update that repartitions flash and
-     * wipes this exact file (see README "OTA оновлення"). */
-    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"smartplug-config.json\"");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_send(req, s_config_transfer_buf, len);
-}
-
-static esp_err_t h_config_import(httpd_req_t *req)
-{
-    if (recv_body(req, s_config_transfer_buf, sizeof(s_config_transfer_buf)) != ESP_OK) {
-        return send_error(req, 400, "body too large or missing");
-    }
-
-    esp_err_t err = storage_write_raw_config(s_config_transfer_buf, strlen(s_config_transfer_buf));
-    if (err == ESP_ERR_INVALID_ARG) return send_error(req, 400, "not a valid config file (expected \"plugs\"/\"settings\")");
-    if (err != ESP_OK) return send_error(req, 500, "failed to write config");
-
-    cJSON *resp = cJSON_CreateObject();
-    cJSON_AddBoolToObject(resp, "ok", true);
-    cJSON_AddStringToObject(resp, "detail", "config saved -- reboot the device (POST /api/system/restart) to apply it");
-    return send_json(req, resp, 200);
-}
 
 static esp_err_t h_system_restart(httpd_req_t *req)
 {
@@ -647,6 +632,40 @@ static esp_err_t h_system_restart(httpd_req_t *req)
     /* Best-effort: give the response above and the log line's LittleFS
      * write a moment to actually land before the reset -- same reasoning
      * as system_health.c's restart_with_log(), not a guarantee. */
+    vTaskDelay(pdMS_TO_TICKS(300));
+    esp_restart();
+    return err; /* unreachable */
+}
+
+/* Full factory reset: erases the plug/settings config (back to firmware
+ * defaults), the stored Wi-Fi STA credentials, and the event log, then
+ * reboots -- the device comes back up exactly as it would on first boot,
+ * reachable only via its always-on setup AP until reconfigured. The three
+ * erase steps are independent of each other by design (storage.c/
+ * wifi_manager.c/event_log.c each own a different partition/namespace), so
+ * this just calls all three rather than needing a combined primitive. */
+static esp_err_t h_system_factory_reset(httpd_req_t *req)
+{
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    esp_err_t err = send_json(req, resp, 200);
+
+    esp_err_t cfg_err = storage_erase_all();
+    esp_err_t wifi_err = wifi_manager_erase_credentials();
+
+    /* Clear the log LAST, then log the reset itself -- otherwise this line
+     * would just be wiped along with everything else it's reporting on.
+     * Same "does the log line survive" ordering concern as
+     * h_system_restart() above, just applied to event_log_clear() instead
+     * of nothing. */
+    event_log_clear();
+    event_log_append(LOG_SRC_API, "-", "factory_reset",
+                      cfg_err == ESP_OK && wifi_err == ESP_OK,
+                      "full device reset (config + wifi credentials erased) requested via web UI");
+
+    /* Best-effort: give the response above and the fresh log line's write
+     * a moment to actually land before the reset -- same reasoning as
+     * h_system_restart() above, not a guarantee. */
     vTaskDelay(pdMS_TO_TICKS(300));
     esp_restart();
     return err; /* unreachable */
@@ -669,13 +688,27 @@ static esp_err_t h_log_get(httpd_req_t *req)
         }
     }
 
-    static char out[8192];
-    esp_err_t err = event_log_read_recent(out, sizeof(out), limit);
-    if (err != ESP_OK) return send_error(req, 500, "failed to read log");
+    /* Heap-allocated, not `static`: the DRAM segment overflowed at link
+     * time by 1040 bytes after the plug_manager.c/fingerprint.c static
+     * buffers were already converted to malloc (see those files) -- this
+     * was the next-largest static left, and GET /api/log is a one-shot,
+     * user/UI-triggered request, not a hot
+     * path, so paying a transient 8KB heap allocation per request instead
+     * of reserving it permanently in .bss costs nothing in practice. */
+    char *out = malloc(8192);
+    if (!out) return send_error(req, 500, "out of memory");
+
+    esp_err_t err = event_log_read_recent(out, 8192, limit);
+    if (err != ESP_OK) {
+        free(out);
+        return send_error(req, 500, "failed to read log");
+    }
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_sendstr(req, out);
+    esp_err_t send_err = httpd_resp_sendstr(req, out);
+    free(out);
+    return send_err;
 }
 
 static esp_err_t h_log_clear(httpd_req_t *req)
@@ -694,6 +727,16 @@ static esp_err_t h_status_get(httpd_req_t *req)
 {
     cJSON *root = cJSON_CreateObject();
 
+    /* Fetched once, reused below both for the AC1 "input level" (it has no
+     * physical GPIO on this board revision -- see input_id_t's comment in
+     * app_types.h; gpio_inputs_get_level() for it would just be the
+     * never-updated initial value, always false -- its real level is the
+     * AC mains monitor's in-band status, same source
+     * plug_manager.c's plug_manager_on_ac_mon_change() uses) and for the
+     * "ac_mon" section further down. */
+    ac_mon_reading_t ac_reading;
+    ac_monitor_get_reading(&ac_reading);
+
     cJSON *inputs = cJSON_CreateArray();
     static const input_id_t ids[] = { INPUT_AC1, INPUT_DC1, INPUT_DC2 };
     static const char *labels[] = { "AC1", "DC1", "DC2" };
@@ -701,7 +744,9 @@ static esp_err_t h_status_get(httpd_req_t *req)
         cJSON *o = cJSON_CreateObject();
         cJSON_AddStringToObject(o, "label", labels[i]);
         cJSON_AddBoolToObject(o, "enabled", gpio_inputs_is_enabled(ids[i]));
-        cJSON_AddBoolToObject(o, "level", gpio_inputs_get_level(ids[i]));
+        bool level = (ids[i] == INPUT_AC1) ? ac_reading.in_band
+                                            : gpio_inputs_get_level(ids[i]);
+        cJSON_AddBoolToObject(o, "level", level);
         cJSON_AddItemToArray(inputs, o);
     }
     cJSON_AddItemToObject(root, "inputs", inputs);
@@ -716,8 +761,6 @@ static esp_err_t h_status_get(httpd_req_t *req)
     cJSON_AddStringToObject(wifi, "ssid", ssid);
     cJSON_AddItemToObject(root, "wifi", wifi);
 
-    ac_mon_reading_t ac_reading;
-    ac_monitor_get_reading(&ac_reading);
     cJSON *ac_mon = cJSON_CreateObject();
     cJSON_AddBoolToObject(ac_mon, "have_reading", ac_reading.have_reading);
     cJSON_AddBoolToObject(ac_mon, "mains_present", ac_reading.mains_present);
@@ -932,7 +975,7 @@ esp_err_t web_server_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = CONFIG_WEB_HTTP_PORT;
     config.uri_match_fn = httpd_uri_match_wildcard;
-    config.max_uri_handlers = 40; /* 25 API/static routes + 7 captive-portal probes + 3 config export/import/restart, some headroom */
+    config.max_uri_handlers = 40; /* 25 API/static routes + 7 captive-portal probes + 2 restart/factory-reset, some headroom */
     /* The manual on/off test button (POST /api/plugs/{id}/action) runs
      * driver_http_set() -- and therefore esp_http_client -- synchronously
      * on this httpd worker task, same as plug_manager.c's own worker_task.
@@ -987,9 +1030,8 @@ esp_err_t web_server_start(void)
         { .uri = "/connecttest.txt",           .method = HTTP_GET, .handler = h_captive_redirect }, /* Windows 10/11 NCSI */
         { .uri = "/ncsi.txt",                  .method = HTTP_GET, .handler = h_captive_redirect }, /* Windows, older */
         { .uri = "/success.txt",               .method = HTTP_GET, .handler = h_captive_redirect }, /* Firefox/Mozilla */
-        { .uri = "/api/config/export",  .method = HTTP_GET,  .handler = h_config_export },
-        { .uri = "/api/config/import",  .method = HTTP_POST, .handler = h_config_import },
         { .uri = "/api/system/restart", .method = HTTP_POST, .handler = h_system_restart },
+        { .uri = "/api/system/factory_reset", .method = HTTP_POST, .handler = h_system_factory_reset },
     };
 
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {

@@ -131,10 +131,24 @@ static void health_task(void *arg)
         /* --- periodic heartbeat --- */
         if (now >= next_heartbeat_us) {
             next_heartbeat_us = now + (int64_t)HEARTBEAT_INTERVAL_MS * 1000;
-            char detail[64];
-            snprintf(detail, sizeof(detail), "uptime=%llds heap=%uB sta=%s",
+            /* Internal free heap alone wasn't enough to diagnose a
+             * "gets slow after long uptime" report -- it turned out to sit
+             * in a flat, tight band the whole time, which just reflects
+             * this project's static buffers (CONFIG_SPIRAM_MALLOC_
+             * ALWAYSINTERNAL keeps big one-off allocations like
+             * h_plugs_get()'s off of it and onto PSRAM instead). Logging
+             * PSRAM's free size and largest free block too closes that
+             * blind spot -- a slow *growing* gap between "free" and
+             * "largest block" on either heap is the actual fragmentation
+             * signal, not the free total by itself. */
+            char detail[128];
+            snprintf(detail, sizeof(detail),
+                     "uptime=%llds heap=%uB heap_blk=%uB psram=%uB psram_blk=%uB sta=%s",
                      (long long)(now / 1000000),
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
                      wifi_manager_is_connected() ? "up" : "down");
             event_log_append(LOG_SRC_SYSTEM, "-", "heartbeat", true, detail);
         }

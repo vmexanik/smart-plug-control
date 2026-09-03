@@ -23,6 +23,29 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # --- Wi-Fi ---
 CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=n
 
+# --- Wi-Fi: reduce internal-DRAM footprint (real ESP_ERR_NO_MEM on hardware) ---
+# esp_wifi_init()/esp_wifi_start() in combined AP+STA mode allocate their
+# RX/TX buffers from internal DRAM -- with the default buffer counts this
+# failed outright on real hardware ("wifi:malloc buffer fail", "Expected to
+# init 10 rx buffer, actual is 1") once plug_manager.c's own tasks (three
+# esp_http_client-capable 12288B-stack tasks -- two of them now deferred
+# past Wi-Fi bring-up, see app_main.c/plug_manager.h) plus gpio_inputs.c/
+# ac_monitor.c had already claimed their share of the same limited pool --
+# combined AP+STA driver buffers alone can run to 60-90KB+ at the defaults.
+# These four match Espressif's own documented "Minimum" configuration rank
+# for memory-constrained ESP32-S3 apps (see "Wi-Fi Buffer Usage" in the
+# ESP-IDF programming guide) -- each buffer is a fixed 1.6KB, so
+# default->minimum here alone recovers roughly 90KB. This device's own
+# traffic is a handful of small sequential local-LAN HTTP/MQTT requests
+# (one plug command or metrics poll at a time, driven by plug_manager.c's
+# own single worker/metrics tasks, never many parallel streams), so the
+# resulting throughput ceiling (still tens of Mbit/s per Espressif's own
+# measurements at this rank) is nowhere near a real constraint here.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=3
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=6
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=6
+CONFIG_ESP_WIFI_RX_BA_WIN=6
+
 # --- HTTP server ---
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_HTTPD_MAX_URI_LEN=512

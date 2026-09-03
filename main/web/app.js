@@ -357,6 +357,7 @@
       $('#pf-enabled').checked = plug.enabled;
       $('#pf-input').value = plug.input;
       $('#pf-invert').checked = plug.invert;
+      $('#pf-on-delay').value = String(plug.on_delay_ms || 0);
       /* Composite dropdown value where possible ("http:shelly_gen2"); falls
        * back to the plain driver for MQTT/Zigbee or for a "known but not
        * templated" HTTP family (e.g. esphome) that has no matching option --
@@ -383,6 +384,7 @@
       $('#plug-modal-title').textContent = 'Нова розетка';
       $('#pf-id').value = '';
       $('#pf-enabled').checked = true;
+      $('#pf-on-delay').value = '0';
       $('#pf-mqtt-qos').value = '0';
       $('#pf-family').value = 'unknown';
       $('#pf-kind').value = 'unknown';
@@ -420,6 +422,7 @@
       enabled: $('#pf-enabled').checked,
       input: $('#pf-input').value,
       invert: $('#pf-invert').checked,
+      on_delay_ms: parseInt($('#pf-on-delay').value, 10) || 0,
       driver: driver,
       http: {
         on_url: $('#pf-http-on').value.trim(),
@@ -798,47 +801,33 @@
     }
   });
 
-  /* ---------------- config export/import ---------------- */
-  $('#btn-export-config').addEventListener('click', () => {
-    /* Plain navigation, not fetch+blob -- the server already sends
-     * Content-Disposition: attachment, so the browser handles the download
-     * on its own, no JS needed on this side. */
-    window.location.href = '/api/config/export';
+  /* ---------------- factory reset ---------------- */
+  const resetModal = $('#reset-modal');
+
+  $('#btn-factory-reset').addEventListener('click', () => {
+    $('#reset-modal-result').textContent = '';
+    $('#reset-modal-result').className = 'save-result';
+    $('#btn-reset-cancel').disabled = false;
+    $('#btn-reset-confirm').disabled = false;
+    resetModal.classList.remove('hidden');
   });
 
-  $('#btn-import-config').addEventListener('click', () => {
-    $('#import-config-file').click();
+  $('#btn-reset-cancel').addEventListener('click', () => {
+    resetModal.classList.add('hidden');
   });
 
-  $('#import-config-file').addEventListener('change', async () => {
-    const input = $('#import-config-file');
-    const file = input.files && input.files[0];
-    input.value = ''; /* so picking the same file again still fires 'change' */
-    if (!file) return;
-
-    const result = $('#config-io-result');
+  $('#btn-reset-confirm').addEventListener('click', async () => {
+    const result = $('#reset-modal-result');
+    $('#btn-reset-cancel').disabled = true;
+    $('#btn-reset-confirm').disabled = true;
+    result.textContent = 'Стирання даних і перезавантаження…';
+    result.className = 'save-result';
     try {
-      const text = await file.text();
-      const r = await api('/api/config/import', { method: 'POST', body: text });
-      result.innerHTML = `Імпортовано. ${escapeHtml(r.detail || '')} `;
-      const btn = document.createElement('button');
-      btn.textContent = 'Перезавантажити зараз';
-      btn.className = 'primary';
-      btn.addEventListener('click', async () => {
-        btn.disabled = true;
-        result.textContent = 'Перезавантаження…';
-        try {
-          await api('/api/system/restart', { method: 'POST' });
-        } catch (e) {
-          /* expected -- the device drops the connection as it restarts */
-        }
-      });
-      result.appendChild(btn);
-      result.className = 'save-result';
+      await api('/api/system/factory_reset', { method: 'POST' });
     } catch (e) {
-      result.textContent = 'Помилка імпорту: ' + e.message;
-      result.className = 'save-result error';
+      /* expected -- the device drops the connection as it restarts */
     }
+    result.textContent = 'Пристрій скинуто й перезавантажується. Підключіться до його точки доступу налаштування (SmartPlug-XXXXXX), щоб налаштувати заново.';
   });
 
   /* ---------------- wifi ---------------- */

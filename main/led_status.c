@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include "sdkconfig.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -9,9 +10,11 @@ static const char *TAG = "led_status";
 
 /* Free, general-purpose GPIO on the ESP32-S3-WROOM-1-N16R8 (not shared with
  * flash/PSRAM, USB-JTAG, console UART or any strapping pin -- see
- * Kconfig.projbuild's pin notes) and not used anywhere else in this
- * firmware (AC1/DC1/DC2 default to GPIO4/5/6). */
-#define LED_STATUS_GPIO       2
+ * Kconfig.projbuild's pin notes). Configurable via Kconfig (menuconfig ->
+ * Smart Plug Control -> Status LED), same pattern as the other physical
+ * pins in this project -- not used anywhere else in this firmware (DC1/DC2
+ * default to GPIO7/2, AC1's ADC input defaults to GPIO11). */
+#define LED_STATUS_GPIO       CONFIG_LED_STATUS_GPIO_DEFAULT
 #define LED_HALF_PERIOD_MS    500   /* 500 on + 500 off = one blink per second */
 
 /* Tiny, self-contained loop -- no network/lock calls, so a 1536-byte stack

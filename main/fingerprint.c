@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <ctype.h>
 #include "esp_http_client.h"
 #include "esp_log.h"
@@ -135,21 +136,36 @@ static bool try_shelly(const char *ip, plug_fingerprint_t *out)
     char url[URL_LEN];
     snprintf(url, sizeof(url), "http://%s/shelly", ip);
 
-    static char body[FETCH_BUF_SIZE];
+    /* Heap-allocated, not `static`: a permanent ~8KB-per-function
+     * reservation across try_shelly()/try_tasmota()/try_esphome() (~24KB
+     * total) was part of what overflowed the DRAM segment at link time.
+     * FETCH_BUF_SIZE (8192) is under CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL
+     * (16384), so this still comes from internal heap rather than PSRAM --
+     * but only for the brief moment this one probe takes, freed right
+     * after, instead of sitting reserved in .bss for the firmware's whole
+     * lifetime. Fingerprinting only runs during a user-initiated network
+     * scan, one host at a time, so this never competes with anything
+     * time-critical. */
+    char *body = malloc(FETCH_BUF_SIZE);
+    if (!body) return false;
+
     int status = 0;
-    esp_err_t err = http_get(url, body, sizeof(body), &status);
+    esp_err_t err = http_get(url, body, FETCH_BUF_SIZE, &status);
     if (err != ESP_OK) {
         ESP_LOGI(TAG, "%s GET /shelly failed: %s", ip, esp_err_to_name(err));
+        free(body);
         return false;
     }
     if (status != 200) {
         ESP_LOGI(TAG, "%s GET /shelly -> HTTP %d, not Shelly", ip, status);
+        free(body);
         return false;
     }
 
     cJSON *root = cJSON_Parse(body);
     if (!root) {
         ESP_LOGI(TAG, "%s GET /shelly returned non-JSON body, not Shelly", ip);
+        free(body);
         return false;
     }
 
@@ -184,6 +200,7 @@ static bool try_shelly(const char *ip, plug_fingerprint_t *out)
     }
 
     cJSON_Delete(root);
+    free(body);
     return true;
 }
 
@@ -231,21 +248,29 @@ static bool try_tasmota(const char *ip, plug_fingerprint_t *out)
     char url[URL_LEN];
     snprintf(url, sizeof(url), "http://%s/cm?cmnd=Status%%200", ip);
 
-    static char body[FETCH_BUF_SIZE];
+    /* Heap-allocated, not `static` -- see try_shelly()'s comment: this
+     * project's three fingerprint.c probe buffers (Shelly/Tasmota/ESPHome)
+     * were part of what overflowed the DRAM segment at link time. */
+    char *body = malloc(FETCH_BUF_SIZE);
+    if (!body) return false;
+
     int status = 0;
-    esp_err_t err = http_get(url, body, sizeof(body), &status);
+    esp_err_t err = http_get(url, body, FETCH_BUF_SIZE, &status);
 
     if (status == 401) {
         out->family = PLUG_FAMILY_TASMOTA;
         out->needs_auth = true;
+        free(body);
         return true; /* confirmed family, but can't read anything else without creds */
     }
     if (err != ESP_OK) {
         ESP_LOGI(TAG, "%s GET /cm?cmnd=Status failed: %s", ip, esp_err_to_name(err));
+        free(body);
         return false;
     }
     if (status != 200) {
         ESP_LOGI(TAG, "%s GET /cm?cmnd=Status -> HTTP %d, not Tasmota", ip, status);
+        free(body);
         return false;
     }
 
@@ -255,6 +280,7 @@ static bool try_tasmota(const char *ip, plug_fingerprint_t *out)
     if (!root || !cJSON_GetObjectItemCaseSensitive(root, "Status")) {
         if (root) cJSON_Delete(root);
         ESP_LOGI(TAG, "%s GET /cm?cmnd=Status -> JSON without \"Status\" field, not Tasmota", ip);
+        free(body);
         return false;
     }
 
@@ -269,7 +295,7 @@ static bool try_tasmota(const char *ip, plug_fingerprint_t *out)
      * exposes one (empty on stock/unmodified templates). */
     snprintf(url, sizeof(url), "http://%s/cm?cmnd=Template", ip);
     int tstatus = 0;
-    if (http_get(url, body, sizeof(body), &tstatus) == ESP_OK && tstatus == 200) {
+    if (http_get(url, body, FETCH_BUF_SIZE, &tstatus) == ESP_OK && tstatus == 200) {
         cJSON *troot = cJSON_Parse(body);
         if (troot) {
             const cJSON *name = cJSON_GetObjectItemCaseSensitive(troot, "NAME");
@@ -288,6 +314,7 @@ static bool try_tasmota(const char *ip, plug_fingerprint_t *out)
      * always use it -- one template covers both. */
     snprintf(out->on_url, sizeof(out->on_url), "http://%s/cm?cmnd=Power1%%20On", ip);
     snprintf(out->off_url, sizeof(out->off_url), "http://%s/cm?cmnd=Power1%%20Off", ip);
+    free(body);
     return true;
 }
 
@@ -301,15 +328,25 @@ static bool try_esphome(const char *ip, plug_fingerprint_t *out)
     char url[URL_LEN];
     snprintf(url, sizeof(url), "http://%s/", ip);
 
-    static char body[FETCH_BUF_SIZE];
+    /* Heap-allocated, not `static` -- see try_shelly()'s comment. */
+    char *body = malloc(FETCH_BUF_SIZE);
+    if (!body) return false;
+
     int status = 0;
-    if (http_get(url, body, sizeof(body), &status) != ESP_OK) return false;
+    if (http_get(url, body, FETCH_BUF_SIZE, &status) != ESP_OK) {
+        free(body);
+        return false;
+    }
     if (status == 401) {
         /* Can't tell if it's ESPHome without a body, but a bare 401 on a
          * still-open :80 is at least worth flagging as "needs auth". */
+        free(body);
         return false;
     }
-    if (status != 200 || !find_ci(body, "esphome")) return false;
+    if (status != 200 || !find_ci(body, "esphome")) {
+        free(body);
+        return false;
+    }
 
     out->family = PLUG_FAMILY_ESPHOME;
     out->kind = PLUG_KIND_UNKNOWN; /* can't tell plug vs. relay vs. light from the index page alone */
@@ -335,6 +372,7 @@ static bool try_esphome(const char *ip, plug_fingerprint_t *out)
             out->kind = PLUG_KIND_PLUG; /* best guess -- a switch entity is the closest match we have */
         }
     }
+    free(body);
     return true;
 }
 #endif

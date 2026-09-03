@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include "esp_wifi.h"
 #include "esp_netif.h"
-/* dhcps_offer_t / OFFER_DNS, see wifi_manager_init()'s AP DHCP DNS setup --
+/* dhcps_offer_t / OFFER_DNS, see wifi_manager_start()'s AP DHCP DNS setup --
  * this header ships inside the "lwip" component (components/lwip/apps/
  * dhcpserver/), not a separate "dhcpserver" component -- listing the
  * latter in main/CMakeLists.txt's REQUIRES fails the build ("unknown
@@ -256,7 +256,7 @@ static bool load_creds(char *ssid, size_t ssid_size, char *pass, size_t pass_siz
     return (e1 == ESP_OK && ssid[0] != '\0' && e2 == ESP_OK);
 }
 
-esp_err_t wifi_manager_init(void)
+esp_err_t wifi_manager_init_netif(void)
 {
     s_scan_lock = xSemaphoreCreateMutex();
     if (!s_scan_lock) return ESP_ERR_NO_MEM;
@@ -270,6 +270,11 @@ esp_err_t wifi_manager_init(void)
     s_ap_netif = esp_netif_create_default_wifi_ap();
     s_sta_netif = esp_netif_create_default_wifi_sta();
 
+    return ESP_OK;
+}
+
+esp_err_t wifi_manager_start(void)
+{
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
@@ -387,6 +392,26 @@ esp_err_t wifi_manager_set_credentials(const char *ssid, const char *password)
     esp_wifi_connect();
 
     return ESP_OK;
+}
+
+esp_err_t wifi_manager_erase_credentials(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    /* Only ssid/pass are ever stored in this namespace (see load_creds()/
+     * wifi_manager_set_credentials() above), so erasing the whole
+     * namespace is equivalent to -- and simpler than -- erasing each key
+     * individually. */
+    nvs_erase_all(h);
+    err = nvs_commit(h);
+    nvs_close(h);
+
+    s_have_sta_creds = false;
+    memset(s_sta_ssid, 0, sizeof(s_sta_ssid));
+    memset(s_sta_pass, 0, sizeof(s_sta_pass));
+
+    return err;
 }
 
 bool wifi_manager_is_connected(void)

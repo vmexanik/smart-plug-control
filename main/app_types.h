@@ -18,15 +18,22 @@ extern "C" {
 #define CONFIG_FILE_PATH     STORAGE_MOUNT_POINT "/config.json"
 #define LOG_FILE_PATH        STORAGE_MOUNT_POINT "/log.txt"
 
-/* Logical trigger inputs. Fixed set of 3 physical lines, purpose given by the
- * user's wiring (AC opto input, two DC inputs). NONE means "not bound to a
- * physical line" (plug is manual/API-only). */
+/* Logical trigger inputs. Fixed set of 3 slots, purpose given by the user's
+ * wiring. DC1/DC2 are real physical GPIO lines, debounced and polled by
+ * gpio_inputs.c. AC1 is NOT a physical GPIO on this board revision -- its
+ * "level" is derived entirely from the AC mains monitor's in-band status
+ * (see ac_monitor.c / plug_manager.c's plug_manager_on_ac_mon_change()):
+ * active exactly when the last ZMPT101B reading's voltage AND frequency are
+ * within the configured system_settings_t.ac_mon band. gpio_inputs.c still
+ * carries an (unused, -1) slot for it so the fixed 3-entry inputs[] array,
+ * storage/web-API shape and the AC1/DC1/DC2 labels stay uniform. NONE means
+ * "not bound to any input" (plug is manual/API-only). */
 typedef enum {
     INPUT_NONE = 0,
-    INPUT_AC1  = 1,
+    INPUT_AC1  = 1, /* virtual -- driven by ac_monitor.c, no physical GPIO */
     INPUT_DC1  = 2,
     INPUT_DC2  = 3,
-    INPUT_COUNT_PHYSICAL = 3, /* AC1, DC1, DC2 */
+    INPUT_COUNT_PHYSICAL = 3, /* AC1 (virtual), DC1, DC2 -- array sizing only, not "3 real GPIOs" */
 } input_id_t;
 
 typedef enum {
@@ -115,6 +122,17 @@ typedef struct {
     bool enabled;               /* master enable, disabled plugs are ignored by input logic */
     input_id_t input;           /* which physical input drives this plug, INPUT_NONE = manual only */
     bool invert;                /* invert the input level before applying it */
+
+    /* Anti-chatter delay (ms) before actually switching this plug ON --
+     * removes relay-contact bounce on power-up. OFF is always dispatched
+     * immediately, never delayed; only ON ever waits. 0 = no delay (ON
+     * applies immediately, same behavior as before this setting existed).
+     * Applied by plug_manager.c to the *already inverted* on/off decision:
+     * callers compute `level ^ invert` first and hand plug_manager the
+     * resulting desired state, so this delay automatically follows
+     * whichever physical edge `invert` maps to "on" -- no separate
+     * inversion handling is needed here. */
+    uint32_t on_delay_ms;
     driver_type_t driver;
     http_driver_cfg_t  http;
     mqtt_driver_cfg_t  mqtt;
@@ -143,14 +161,31 @@ typedef struct {
      * do_dispatch()'s network call (and its multi-second timeout) instead of
      * piling up doomed requests when the device is known to be offline. */
     bool reachable;
+
+    /* Anti-chatter ON-delay bookkeeping (see on_delay_ms above), guarded by
+     * plug_manager.c's s_lock same as the rest of this struct -- not
+     * persisted, reset to "nothing pending" on every boot.
+     * on_delay_due_us: 0 means no delayed ON is currently pending for this
+     * plug; otherwise it's the esp_timer_get_time() deadline at which
+     * plug_manager.c's on_delay_task() should actually dispatch the ON.
+     * Cleared back to 0 either when that dispatch happens, or immediately
+     * if a newer command supersedes it first (an OFF always cancels a
+     * pending ON outright; another ON just reschedules the deadline).
+     * on_delay_source: the log source string (see event_log.h's LOG_SRC_*)
+     * to attribute the eventual delayed dispatch to, captured at schedule
+     * time since the original caller's stack frame is long gone by the
+     * time on_delay_task() fires. */
+    int64_t on_delay_due_us;
+    char on_delay_source[16];
 } plug_t;
 
 typedef struct {
     input_id_t id;
     char label[8];    /* "AC1", "DC1", "DC2" */
-    int  gpio;        /* fixed by Kconfig (see force_fixed_input_fields() in
-                        * plug_manager.c) -- never editable via config.json
-                        * or the web UI, only "enabled" is. */
+    int  gpio;        /* fixed by Kconfig (see storage_force_fixed_inputs() in
+                        * storage.c) -- never editable via config.json or the
+                        * web UI, only "enabled" is. -1 for AC1: it has no
+                        * physical GPIO, see input_id_t's comment above. */
     bool enabled;      /* system setting: is this input actively listened to */
 } input_cfg_t;
 

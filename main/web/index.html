@@ -111,14 +111,9 @@
     <button id="btn-save-settings" class="primary">Зберегти налаштування</button>
     <span id="settings-save-result" class="save-result"></span>
 
-    <h2>Резервна копія налаштувань</h2>
-    <p class="hint">Оновлення прошивки (OTA) переносить розділ зі збереженими розетками й налаштуваннями на нове місце у флеш-пам'яті — старі дані при цьому губляться. Збережіть копію перед оновленням, щоб потім відновити.</p>
-    <div class="toolbar">
-      <button type="button" id="btn-export-config">Експортувати (завантажити файл)</button>
-      <button type="button" id="btn-import-config">Імпортувати з файлу…</button>
-      <input type="file" id="import-config-file" accept="application/json,.json" hidden>
-    </div>
-    <span id="config-io-result" class="save-result"></span>
+    <h2>Повне скидання пристрою</h2>
+    <p class="hint">Стирає всі розетки, системні налаштування, збережений пароль Wi-Fi та журнал подій, повертаючи пристрій до заводського стану. Після цього пристрій перезавантажиться і буде доступний лише через власну точку доступу налаштування, як одразу після першого ввімкнення.</p>
+    <button type="button" id="btn-factory-reset" class="danger">Скинути пристрій до заводських налаштувань</button>
   </section>
 
   <section id="tab-log" class="tab-content">
@@ -157,8 +152,13 @@
             <option value="DC2">DC2</option>
           </select>
         </label>
-        <label><input type="checkbox" id="pf-invert"> Інверсія</label>
+        <label>
+          <input type="checkbox" id="pf-invert"> Інверсія</label>
+                  <label>Таймаут увімкнення, мс
+          <input type="number" id="pf-on-delay" min="0" max="60000" step="50" value="0">
+        </label>
       </div>
+      <p class="hint">Вимикається розетка завжди миттєво. Це значення затримує лише увімкнення -- корисно, щоб прибрати дребезг контактів реле. 0 = без затримки. Враховує інверсію: затримка застосовується вже після неї, тобто до фактичного стану "увімкнено".</p>
 
       <label>Драйвер / протокол
         <select id="pf-driver">
@@ -266,6 +266,18 @@
       <button id="btn-wifi-scan-go" class="primary">Почати пошук</button>
       <button type="button" id="btn-wifi-scan-close">Закрити</button>
     </div>
+  </div>
+</div>
+
+<div id="reset-modal" class="modal hidden">
+  <div class="modal-box">
+    <h2>Скинути пристрій до заводських налаштувань?</h2>
+    <p class="hint">Це незворотно видалить усі розетки, системні налаштування, збережений пароль Wi-Fi та журнал подій. Пристрій перезавантажиться і буде доступний лише через точку доступу налаштування, як одразу після першого ввімкнення.</p>
+    <div class="form-actions">
+      <button type="button" id="btn-reset-cancel">Скасувати</button>
+      <button type="button" id="btn-reset-confirm" class="danger">Стерти</button>
+    </div>
+    <div id="reset-modal-result" class="save-result"></div>
   </div>
 </div>
 
