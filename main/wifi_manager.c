@@ -476,3 +476,16 @@ bool wifi_manager_get_sta_dns(esp_ip4_addr_t *out)
     *out = dns.ip.u_addr.ip4;
     return out->addr != 0;
 }
+
+bool wifi_manager_get_sta_rssi(int8_t *out)
+{
+    if (!s_sta_connected || !out) return false;
+    wifi_ap_record_t info;
+    /* esp_wifi_sta_get_ap_info() returns ESP_ERR_WIFI_NOT_CONNECT if the
+     * STA link drops in the gap between the s_sta_connected check above
+     * and this call -- not treated as a bug, just the same "false means
+     * don't trust *out" case as everything else here. */
+    if (esp_wifi_sta_get_ap_info(&info) != ESP_OK) return false;
+    *out = info.rssi;
+    return true;
+}

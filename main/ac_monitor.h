@@ -17,8 +17,10 @@ typedef struct {
     float vrms;             /* volts, meaningless (0) if !mains_present */
     float freq_hz;          /* Hz, meaningless (0) if !mains_present */
     bool  in_band;          /* vrms/freq_hz both within settings.ac_mon's [min,max] --
-                              * always true if settings.ac_mon.enabled is false or
-                              * !mains_present (nothing to protect against) */
+                              * always true if !mains_present (nothing to protect
+                              * against yet). AC1 monitoring has no on/off setting --
+                              * monitoring is the entire point of the AC1 input, so
+                              * it's unconditionally active whenever mains is present. */
     int64_t updated_us;     /* esp_timer_get_time() at the last processed window */
 } ac_mon_reading_t;
 
@@ -33,7 +35,7 @@ typedef void (*ac_mon_change_cb_t)(bool in_band);
  * for the GPIO/channel and the full measurement approach) and a background
  * task that processes it a couple times a second. settings is copied, not
  * retained -- call ac_monitor_update_settings() after any settings change
- * (same pattern as event_log_update_limits()/gpio_inputs_update_settings()).
+ * (same pattern as gpio_inputs_update_settings()).
  * on_change may be NULL if nothing needs to react to in-band transitions
  * (e.g. status-only builds); ac_monitor.c deliberately does not #include
  * plug_manager.h itself, same decoupling pattern as gpio_inputs.c. */

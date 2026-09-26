@@ -197,9 +197,14 @@ typedef struct {
  * them and exposes the result (ac_mon_reading_t.in_band) for whoever wants
  * to act on it. Voltage is whole volts (1V steps are plenty for a mains
  * quality check); frequency keeps two decimal places since mains frequency
- * normally only drifts by hundredths of a Hz even under real grid stress. */
+ * normally only drifts by hundredths of a Hz even under real grid stress.
+ *
+ * No on/off flag here on purpose -- AC1's entire reason to exist is
+ * monitoring the mains (see input_id_t's comment above on AC1), so
+ * an "enable monitoring" toggle would have nothing to turn off without
+ * also disabling AC1 itself. Band checking is unconditionally active
+ * whenever ac_monitor.c has a real reading. */
 typedef struct {
-    bool  enabled;
     int   v_min;    /* volts */
     int   v_max;    /* volts */
     float f_min;    /* Hz, 0.01 precision */
@@ -217,8 +222,9 @@ typedef struct {
     char mqtt_pass[AUTH_LEN];
     char mqtt_client_id[32];
 
-    uint32_t log_max_file_size;
-    uint32_t log_max_files;
+    /* No more log_max_file_size/log_max_files here -- the event log is a
+     * fixed EVENT_LOG_MAX_LINES (50) most-recent entries now, not a
+     * user-tunable byte-size/rotation-count pair (see event_log.c). */
 
     /* NTP server is intentionally NOT here -- it's fixed at build time via
      * CONFIG_NTP_SERVER_DEFAULT (Kconfig), not runtime/web-editable. See

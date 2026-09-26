@@ -51,11 +51,55 @@
   });
 
   /* ---------------- status bar ---------------- */
+  /* uptime is rendered exactly ONCE, right after the first successful
+   * loadStatus() seeds it from the device's real uptime_s -- no periodic
+   * re-render, no setInterval, nothing keeps ticking it after that. This
+   * is by explicit request: any periodic update (even just a resync with
+   * no DOM rebuild) was visibly janky under main-thread contention from
+   * the rest of the page's polling. #uptime-val therefore shows a static
+   * snapshot of uptime as of page load and only changes again on a full
+   * page reload, which re-seeds it from a fresh reading. */
+  let uptimeBaseSec = 0;
+  let uptimeSyncMs = Date.now();
+  let uptimeSeeded = false;
+
+  function renderUptime() {
+    const el = $('#uptime-val');
+    if (!el || !uptimeSeeded) return; /* nothing real to show yet */
+    const elapsedSec = Math.floor((Date.now() - uptimeSyncMs) / 1000);
+    el.textContent = formatUptime(uptimeBaseSec + Math.max(0, elapsedSec));
+  }
+
+  /* Mobile-style 4-bar signal icon from RSSI (dBm, negative -- see
+   * wifi_manager_get_sta_rssi()'s doc comment in wifi_manager.h).
+   * Thresholds are the same rule of thumb Android/iOS status bars use --
+   * there's no universal standard, just "closer to 0 is better". Returns
+   * '' for rssi == null/undefined (not connected -- h_status_get() in
+   * web_server.c simply omits the field then, which JSON.parse() surfaces
+   * here as undefined) so callers can drop it into a template
+   * unconditionally. */
+  function signalIcon(rssi) {
+    if (rssi === null || rssi === undefined) return '';
+    let bars, color;
+    if (rssi >= -55) { bars = 4; color = 'var(--bs-green)'; }
+    else if (rssi >= -65) { bars = 3; color = 'var(--bs-green)'; }
+    else if (rssi >= -75) { bars = 2; color = 'var(--bs-yellow)'; }
+    else if (rssi >= -85) { bars = 1; color = 'var(--bs-red)'; }
+    else { bars = 0; color = 'var(--bs-red)'; }
+    const heights = [5, 8, 11, 14]; /* bar1..bar4, shortest to tallest */
+    const xs = [0, 5, 10, 15];
+    const rects = heights.map((h, i) => {
+      const fill = (i < bars) ? color : 'var(--bs-border-color)';
+      return `<rect x="${xs[i]}" y="${16 - h}" width="3" height="${h}" fill="${fill}"/>`;
+    }).join('');
+    return `<svg class="signal-icon" viewBox="0 0 18 16" width="18" height="14" title="${rssi} dBm">${rects}</svg>`;
+  }
+
   async function loadStatus() {
     try {
       const s = await api('/api/status');
       const wifiTxt = s.wifi.sta_connected
-        ? `<span class="good">STA: ${s.wifi.ssid} (${s.wifi.sta_ip})</span>`
+        ? `<span class="good">STA: ${s.wifi.ssid} (${s.wifi.sta_ip}) ${signalIcon(s.wifi.rssi)}</span>`
         : s.wifi.config_error
           ? `<span class="bad">STA: не вдалося підключитись до "${escapeHtml(s.wifi.ssid)}" — перевірте пароль (Налаштування)</span>`
           : `<span class="bad">STA не підключено</span>`;
@@ -63,7 +107,29 @@
         .filter(i => i.enabled)
         .map(i => `${i.label}=${i.level ? 1 : 0}`)
         .join(', ') || 'немає активних входів';
-      $('#status-bar').innerHTML = `${wifiTxt} <br> AP: ${s.wifi.ap_ip} <br> Входи: ${inputsTxt} <br> uptime ${formatUptime(s.uptime_s)}`;
+      /* Update only the wifi/AP/inputs sub-spans, never the whole
+       * #status-bar innerHTML -- replacing the whole block every 5s used
+       * to destroy and recreate #uptime-val itself (and the signal-icon
+       * SVG next to it) each time, which was a source of visible stutter.
+       * #uptime-val now lives permanently in the static skeleton in
+       * index.html and is never touched here directly -- renderUptime()
+       * writes to it exactly once, at seed time (see below). */
+      $('#wifi-status-line').innerHTML = wifiTxt;
+      $('#ap-ip-val').textContent = s.wifi.ap_ip;
+      $('#inputs-status-line').textContent = inputsTxt;
+      /* Seed the uptime clock from the device's real uptime_s exactly
+       * once (see the file-level comment above renderUptime()) and render
+       * it right there -- every loadStatus() after the first leaves
+       * uptimeBaseSec/uptimeSyncMs/#uptime-val alone entirely. */
+      if (!uptimeSeeded) {
+        uptimeBaseSec = s.uptime_s || 0;
+        uptimeSyncMs = Date.now();
+        uptimeSeeded = true;
+        renderUptime();
+      }
+      /* No periodic renderUptime() call here anymore -- uptime is shown
+       * once from the seed above and only refreshed on a full page
+       * reload, per explicit request. */
 
       const acEl = $('#ac-mon-status');
       if (acEl && s.ac_mon) {
@@ -80,14 +146,17 @@
         }
       }
     } catch (e) {
-      $('#status-bar').innerHTML = `<span class="bad">Помилка статусу: ${e.message}</span>`;
+      /* Only the wifi slot, same reasoning as above -- a transient fetch
+       * error shouldn't also blank out AP/inputs/uptime, and definitely
+       * shouldn't destroy #uptime-val's node. */
+      $('#wifi-status-line').innerHTML = `<span class="bad">Помилка статусу: ${e.message}</span>`;
     }
   }
 
   function formatUptime(sec) {
     sec = Math.floor(sec || 0);
     const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
-    return `${h}г ${m}хв ${s}с`;
+    return `${h}:${m}:${s}`;
   }
 
   /* ---------------- plugs ---------------- */
@@ -104,31 +173,142 @@
    * Now the loading placeholder only shows before there's anything to show
    * yet; once real content is on screen, a refresh just swaps it in. */
   let plugsLoadedOnce = false;
+  /* id -> { card, data, nameEl, inputEl, stateEl, btn }. `data` is the
+   * mutable plug object each card's listeners close over (see
+   * createPlugCard() below) -- loadPlugs() updates its fields in place via
+   * Object.assign() rather than ever handing out a new object for an
+   * existing id, so a listener created on card #1 keeps reading whatever
+   * is currently true without needing to be re-attached. */
+  const plugCardsById = new Map();
 
+  /* Diff-updates the DOM against the server's plug list instead of
+   * `list.innerHTML = ''` + rebuilding every card from scratch every 10s
+   * (the original approach here, and the actual cause of a reported
+   * uptime-ticker stutter -- see the memory notes on this session's
+   * investigation): tearing down and recreating N cards' worth of divs,
+   * buttons, inline SVGs and listeners is real synchronous main-thread
+   * work every single poll, even when nothing on screen actually changed
+   * (which is the common case -- most 10s polls just confirm the same
+   * on/off state and the same wattage). Now: existing cards are patched
+   * in place (updatePlugCard()), new plugs get a card created once
+   * (createPlugCard()), removed plugs get their card removed, and
+   * everything is reordered to match the server's array order via
+   * `list.appendChild()` on already-attached nodes -- which *moves* a
+   * node instead of destroying/recreating it. */
   async function loadPlugs() {
     const list = $('#plugs-tbody');
-    if (!plugsLoadedOnce) list.innerHTML = '<div class="list-empty">завантаження…</div>';
+    if (!plugsLoadedOnce) 
+      list.innerHTML = '<div class="list-empty">завантаження…</div>';
     try {
       const plugs = await api('/api/plugs');
       plugsLoadedOnce = true;
       if (!plugs.length) {
         list.innerHTML = '<div class="list-empty">Немає розеток. Натисніть "Додати розетку".</div>';
+        plugCardsById.clear(); /* the innerHTML= above already dropped their nodes */
         return;
       }
-      list.innerHTML = '';
-      plugs.forEach((p) => list.appendChild(renderPlugRow(p)));
+
+      /* The loading/error/empty placeholder above is a plain div that
+       * isn't tracked in plugCardsById, and list.appendChild() below only
+       * ever adds/moves tracked cards -- it never clears unrelated
+       * siblings. So on the very first transition into "we have real
+       * data", with no cards built yet, clear it out here once; every
+       * subsequent poll has plugCardsById.size > 0 and skips this. */
+      if (!plugCardsById.size) list.innerHTML = '';
+
+      const seenIds = new Set();
+      plugs.forEach((p) => {
+        seenIds.add(p.id);
+        let entry = plugCardsById.get(p.id);
+        if (!entry) {
+          entry = createPlugCard(p); /* p itself becomes the persisted, mutable `data` */
+          plugCardsById.set(p.id, entry);
+        } else if (entry.data !== p) {
+          Object.assign(entry.data, p); /* keep the object identity every listener closed over */
+        }
+        updatePlugCard(entry);
+        list.appendChild(entry.card); /* moves it into position if it's already attached */
+      });
+
+      /* Anything no longer in the response (deleted, or this device
+       * capped MAX_PLUGS and dropped one) loses its card. */
+      for (const [id, entry] of plugCardsById) {
+        if (!seenIds.has(id)) {
+          entry.card.remove();
+          plugCardsById.delete(id);
+        }
+      }
     } catch (e) {
       if (!plugsLoadedOnce) list.innerHTML = `<div class="list-empty error-text">Помилка: ${e.message}</div>`;
     }
   }
 
-  /* Whole card opens the edit form (all fields besides name/input/state are
-   * only editable there); the action button is the one exception -- it
-   * stops propagation so it can toggle on/off without opening the form. */
-  function renderPlugRow(p) {
+  /* Builds a card's static DOM shape and its listeners ONCE. Both close
+   * over `data` (not a copy) so they always act on whatever loadPlugs()
+   * has most recently written into it via Object.assign() -- no need to
+   * ever re-attach a listener when a poll brings fresher values. Content
+   * that actually varies (name/badges/metrics/state pill/button
+   * look+title) is left for updatePlugCard() to fill in, called once
+   * right after this and then again on every subsequent poll. */
+  function createPlugCard(data) {
     const card = document.createElement('div');
     card.className = 'device-card';
+    card.innerHTML = `
+      <div class="device-name"></div>
+      <div class="device-input"></div>
+      <div class="device-state"></div>
+      <div class="device-action">
+        <button type="button" class="device-action-btn" data-act="toggle">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2v10"/>
+            <path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>
+          </svg>
+        </button>
+      </div>`;
 
+    /* Whole card opens the edit form (all fields besides name/input/state
+     * are only editable there); the action button is the one exception --
+     * it stops propagation so it can toggle on/off without opening the
+     * form.
+     *
+     * The greyed-out (trigger-controlled / offline) look updatePlugCard()
+     * applies below is a CSS class, not the `disabled` attribute,
+     * specifically so the button stays clickable -- but testPlug() below
+     * still sets the real `disabled` attribute for the brief in-flight
+     * window of an actual request, and a disabled <button> has
+     * pointer-events:none (global "button:disabled" rule in style.css), so
+     * a click during that window hit-tests straight through to whatever's
+     * underneath -- .device-action here -- and would otherwise bubble up
+     * and pop open the edit modal. Checking for .device-action here (rather
+     * than the button itself, which won't be ev.target in that case) covers
+     * both the normal case (button's own listener already
+     * stopPropagation()s, so this is a no-op) and that brief disabled
+     * window (where this is the only thing stopping the modal). */
+    card.addEventListener('click', (ev) => {
+      if (ev.target.closest('.device-action')) return;
+      openPlugModal(data);
+    });
+    const btn = card.querySelector('[data-act="toggle"]');
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      testPlug(data.id, !data.last_state, data.name, btn);
+    });
+
+    return {
+      card,
+      data,
+      nameEl: card.querySelector('.device-name'),
+      inputEl: card.querySelector('.device-input'),
+      stateEl: card.querySelector('.device-state'),
+      btn,
+    };
+  }
+
+  /* Writes p's current fields into an existing card's sub-elements --
+   * called once right after createPlugCard() and again on every poll.
+   * Never touches `card` itself or `btn`'s child <svg>, so the listeners
+   * set up in createPlugCard() are always still the ones handling clicks. */
+  function updatePlugCard({ card, data: p, nameEl, inputEl, stateEl, btn }) {
     const statePill = p.last_cmd_ok
       ? `<span class="pill ${p.last_state ? 'on' : 'off'}">${p.last_state ? 'ON' : 'OFF'}</span>`
       : `<span class="pill fail">помилка</span>`;
@@ -161,18 +341,7 @@
      * now refuses a manual command for it (plug_manager_test_action(), see
      * app_types.h/plug_manager.c) precisely because letting both the input
      * AND a manual click drive the same relay is a race with no single
-     * source of truth (whichever fires last/next wins, unpredictably).
-     *
-     * This is only a *soft* block in the UI (a CSS class, not the `disabled`
-     * attribute): a real `disabled` button never dispatches a click event at
-     * all, so the backend's specific rejection reason (a Ukrainian sentence
-     * meant to actually be read, see plug_manager_test_action()) would never
-     * reach testPlug() and its toast() call -- the user would just see a
-     * greyed-out button with nothing happening, and on a touch screen there's
-     * no hover to even reveal the `title` tooltip as a fallback. Letting the
-     * click through, hitting the backend, and surfacing its detail message
-     * via toast is strictly more informative, for both the trigger-controlled
-     * and offline cases. */
+     * source of truth (whichever fires last/next wins, unpredictably). */
     const triggerControlled = p.input !== 'NONE';
     const toggleDisabled = offline || triggerControlled;
     let toggleTitle;
@@ -180,52 +349,18 @@
     else if (offline) toggleTitle = 'Розетка не на зв\'язку';
     else toggleTitle = p.last_state ? 'Вимкнути' : 'Увімкнути';
 
-    card.innerHTML = `
-      <div class="device-name">${escapeHtml(p.name)}${p.enabled ? '' : ' <span class="hint">(вимкнена)</span>'}${offline ? ' <span class="hint bad">(не на зв\'язку)</span>' : ''}${metricsHtml}</div>
-      <div class="device-input">${p.input === 'NONE' ? '<span class="hint">без входу</span>' : p.input}</div>
-      <div class="device-state">${statePill}</div>
-      <div class="device-action">
-        <button type="button" class="device-action-btn ${p.last_state ? 'state-on' : 'state-off'}${toggleDisabled ? ' is-blocked' : ''}" data-act="toggle"
-                title="${toggleTitle}" aria-label="Перемкнути ${escapeHtml(p.name)}">
-          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2v10"/>
-            <path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>
-          </svg>
-        </button>
-      </div>`;
-
-    /* The greyed-out (trigger-controlled / offline) look above is a CSS
-     * class now, not the `disabled` attribute, specifically so the button
-     * stays clickable (see the big comment above) -- but testPlug() below
-     * still sets the real `disabled` attribute for the brief in-flight
-     * window of an actual request, and a disabled <button> has
-     * pointer-events:none (global "button:disabled" rule in style.css), so
-     * a click during that window hit-tests straight through to whatever's
-     * underneath -- .device-action here -- and would otherwise bubble up
-     * and pop open the edit modal. Checking for .device-action here (rather
-     * than the button itself, which won't be ev.target in that case) covers
-     * both the normal case (button's own listener already
-     * stopPropagation()s, so this is a no-op) and that brief disabled
-     * window (where this is the only thing stopping the modal). */
-    card.addEventListener('click', (ev) => {
-      if (ev.target.closest('.device-action')) return;
-      openPlugModal(p);
-    });
-    const btn = card.querySelector('[data-act="toggle"]');
-    btn.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      testPlug(p.id, !p.last_state, p.name, btn);
-    });
-
-    return card;
+    nameEl.innerHTML = `${escapeHtml(p.name)}${p.enabled ? '' : ' <span class="hint">(вимкнена)</span>'}${offline ? ' <span class="hint bad">(не на зв\'язку)</span>' : ''}${metricsHtml}`;
+    inputEl.innerHTML = p.input === 'NONE' ? '<span class="hint">без входу</span>' : p.input;
+    stateEl.innerHTML = statePill;
+    btn.className = `device-action-btn ${p.last_state ? 'state-on' : 'state-off'}${toggleDisabled ? ' is-blocked' : ''}`;
+    btn.title = toggleTitle;
+    btn.setAttribute('aria-label', `Перемкнути ${escapeHtml(p.name)}`);
   }
 
   /* Tracks plugs with a request currently in flight so a second click before
    * the first one's response comes back is simply ignored rather than
    * firing another request on top of it -- belt-and-suspenders alongside
-   * disabling the button itself (which loadPlugs()'s upcoming re-render
-   * will always eventually reset, so this covers the brief window between
-   * click and that re-render too). */
+   * disabling the button itself. */
   const pendingToggles = new Set();
 
   async function testPlug(id, on, name, btn) {
@@ -240,7 +375,11 @@
       toast(`"${name}" ${e.message}`, true);
     } finally {
       pendingToggles.delete(id);
-      if (btn) btn.disabled = false; /* harmless no-op if loadPlugs() already replaced this node */
+      /* This is the same <button> node loadPlugs() just patched in place
+       * (updatePlugCard() never touches .disabled, only .className/.title/
+       * aria-label -- see createPlugCard()/updatePlugCard()), not a
+       * leftover reference to a node that got thrown away. */
+      if (btn) btn.disabled = false;
     }
   }
 
@@ -751,10 +890,7 @@
       $('#set-mqtt-client-id').value = s.mqtt_client_id;
       $('#set-mqtt-user').value = s.mqtt_user;
       $('#set-mqtt-pass').value = s.mqtt_pass;
-      $('#set-log-size').value = s.log_max_file_size;
-      $('#set-log-files').value = s.log_max_files;
       if (s.ac_mon) {
-        $('#set-acmon-enabled').checked = s.ac_mon.enabled;
         $('#set-acmon-vmin').value = s.ac_mon.v_min;
         $('#set-acmon-vmax').value = s.ac_mon.v_max;
         $('#set-acmon-fmin').value = s.ac_mon.f_min;
@@ -779,10 +915,7 @@
       mqtt_client_id: $('#set-mqtt-client-id').value.trim(),
       mqtt_user: $('#set-mqtt-user').value,
       mqtt_pass: $('#set-mqtt-pass').value,
-      log_max_file_size: parseInt($('#set-log-size').value, 10) || 65536,
-      log_max_files: parseInt($('#set-log-files').value, 10) || 5,
       ac_mon: {
-        enabled: $('#set-acmon-enabled').checked,
         v_min: parseInt($('#set-acmon-vmin').value, 10) || 0,
         v_max: parseInt($('#set-acmon-vmax').value, 10) || 0,
         f_min: parseFloat($('#set-acmon-fmin').value) || 0,
@@ -923,8 +1056,9 @@
     const list = $('#log-tbody');
     list.innerHTML = '<div class="list-empty">завантаження…</div>';
     try {
-      const limit = $('#log-limit').value;
-      const entries = await api(`/api/log?limit=${limit}`);
+      /* No more #log-limit selector -- event_log.c only ever keeps the
+       * last 50 entries now, so there's nothing for it to select between. */
+      const entries = await api('/api/log?limit=50');
       if (!entries.length) {
         list.innerHTML = '<div class="list-empty">Журнал порожній</div>';
         return;
@@ -952,7 +1086,6 @@
   }
 
   $('#btn-refresh-log').addEventListener('click', loadLog);
-  $('#log-limit').addEventListener('change', loadLog);
   $('#btn-clear-log').addEventListener('click', async () => {
     if (!confirm('Очистити весь журнал подій?')) return;
     try {
@@ -973,6 +1106,7 @@
    * modal is open so a background reload can't yank a card out from under
    * someone mid-edit. */
   setInterval(() => {
-    if (modal.classList.contains('hidden')) loadPlugs();
+    if (modal.classList.contains('hidden')) 
+      loadPlugs();
   }, 10000);
 })();

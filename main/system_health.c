@@ -49,9 +49,8 @@ static const char *TAG = "system_health";
  * only the user changing the credentials in the UI can. */
 #define WIFI_STUCK_RESTART_MS (15 * 60 * 1000)
 
-/* Forensic trail on flash for whenever the *next* hang happens -- so there
- * is at least some data to look at afterward even without a live serial
- * monitor attached overnight. */
+/* Forensic trail for whenever the *next* hang happens -- ESP_LOGI'd only
+ * (see health_task() below), not written to the persisted event log. */
 #define HEARTBEAT_INTERVAL_MS (30 * 60 * 1000)
 
 static void restart_with_log(const char *reason)
@@ -150,7 +149,15 @@ static void health_task(void *arg)
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
                      wifi_manager_is_connected() ? "up" : "down");
-            event_log_append(LOG_SRC_SYSTEM, "-", "heartbeat", true, detail);
+            /* ESP_LOGI only, not event_log_append() -- the persisted event
+             * log now caps at EVENT_LOG_MAX_LINES (50) most-recent entries
+             * (see event_log.c), and a heartbeat every 30 minutes would
+             * flood that out within ~25 hours, burying real plug/input/
+             * API events under nothing but heartbeats. Serial/UART is
+             * still the place to capture this for a heap-fragmentation
+             * hunt (idf.py monitor, or a serial logger left running
+             * overnight), same as before. */
+            ESP_LOGI(TAG, "heartbeat: %s", detail);
         }
     }
 }

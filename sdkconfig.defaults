@@ -94,3 +94,15 @@ CONFIG_ESP_TASK_WDT_PANIC=y
 # lowered at the same time so a single scan doesn't need this much headroom
 # on its own.
 CONFIG_LWIP_MAX_SOCKETS=32
+
+# --- ADC ---
+# AC mains monitor (ac_monitor.c) is wired to GPIO11, which is ADC2_CH0 --
+# physically that's pin 19 on the ESP32-S3-WROOM-1 module, already routed
+# on this board's PCB, and the user chose not to re-route it to an ADC1 pin.
+# Recent ESP-IDF versions refuse adc_continuous_config() on ADC2 entirely
+# on S3/C3 ("ADC2 continuous mode is no longer supported, please use
+# ADC1") unless this is set. Known trade-off, accepted deliberately: ADC2
+# shares hardware with the Wi-Fi radio, and Wi-Fi is always on on this
+# device, so readings can be delayed/noisier while it's active (see the
+# runtime warning ac_monitor_init() logs when AC_MON_ADC_UNIT is ADC_UNIT_2).
+CONFIG_ADC_CONTINUOUS_FORCE_USE_ADC2_ON_C3_S3=y

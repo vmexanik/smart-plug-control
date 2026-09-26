@@ -10,7 +10,12 @@
 <body>
 <header>
   <h1>Smart Plug Control</h1>
-  <div id="status-bar" class="status-bar">завантаження статусу…</div>
+  <div id="status-bar" class="status-bar">
+    <span id="wifi-status-line">завантаження статусу…</span> <br>
+    AP: <span id="ap-ip-val">-</span> <br>
+    Входи: <span id="inputs-status-line">-</span> <br>
+    uptime <span id="uptime-val">-</span>
+  </div>
 </header>
 
 <nav class="tabs">
@@ -35,10 +40,9 @@
     <div class="inputs-list" id="inputs-tbody"></div>
 
     <h2>AC моніторинг (ZMPT101B)</h2>
-    <p class="hint">Вимір напруги та частоти мережі. Якщо увімкнено, значення поза межами позначаються як "поза межами" в статусі нижче.</p>
+    <p class="hint">Вимір напруги та частоти мережі. Значення поза межами позначаються як "поза межами" в статусі нижче.</p>
     <div id="ac-mon-status" class="status-block"></div>
     <div class="form-grid">
-      <label><input type="checkbox" id="set-acmon-enabled"> Увімкнути моніторинг меж</label>
       <label>Мін. напруга, В
         <input type="number" id="set-acmon-vmin" min="100" max="300" step="1">
       </label>
@@ -46,10 +50,10 @@
         <input type="number" id="set-acmon-vmax" min="100" max="300" step="1">
       </label>
       <label>Мін. частота, Гц
-        <input type="number" id="set-acmon-fmin" min="40" max="70" step="0.01">
+        <input type="number" id="set-acmon-fmin" min="40" max="65" step="0.1">
       </label>
       <label>Макс. частота, Гц
-        <input type="number" id="set-acmon-fmax" min="40" max="70" step="0.01">
+        <input type="number" id="set-acmon-fmax" min="40" max="65" step="0.1">
       </label>
     </div>
 
@@ -98,16 +102,6 @@
     <button id="btn-set-time">Встановити вручну</button>
     <span id="time-save-result" class="save-result"></span>
 
-    <h2>Журнал подій</h2>
-    <div class="form-grid">
-      <label>Макс. розмір файлу (байт)
-        <input type="number" id="set-log-size" min="4096" step="1024">
-      </label>
-      <label>Кількість файлів ротації
-        <input type="number" id="set-log-files" min="1" max="8" step="1">
-      </label>
-    </div>
-
     <button id="btn-save-settings" class="primary">Зберегти налаштування</button>
     <span id="settings-save-result" class="save-result"></span>
 
@@ -118,14 +112,7 @@
 
   <section id="tab-log" class="tab-content">
     <div class="toolbar">
-      <label>Показати останні
-        <select id="log-limit">
-          <option value="50">50</option>
-          <option value="100" selected>100</option>
-          <option value="200">200</option>
-          <option value="500">500</option>
-        </select>
-      </label>
+      <span class="hint">Зберігаються останні 50 подій</span>
       <button id="btn-refresh-log">Оновити</button>
       <button id="btn-clear-log" class="danger">Очистити журнал</button>
     </div>

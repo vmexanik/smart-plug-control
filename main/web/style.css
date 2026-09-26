@@ -10,6 +10,7 @@
   --bs-red: #dc3545;
   --bs-red-dark: #bb2d3b;
   --bs-green: #198754;
+  --bs-yellow: #ffc107;
   --bs-gray: #6c757d;
   --bs-gray-dark: #495057;
   --bs-body-bg: #f8f9fa;
@@ -69,6 +70,9 @@ header h1 {
 
 .status-bar .bad { color: var(--bs-red); font-weight: 600; }
 .status-bar .good { color: var(--bs-green); font-weight: 600; }
+
+/* Mobile-style STA signal-strength bars, see signalIcon() in app.js. */
+.signal-icon { vertical-align: middle; margin-left: 2px; }
 
 /* ---------------- nav pills (tabs) ---------------- */
 

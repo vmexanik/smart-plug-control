@@ -510,11 +510,8 @@ static cJSON *settings_to_json(const system_settings_t *s)
     cJSON_AddStringToObject(root, "mqtt_user", s->mqtt_user);
     cJSON_AddStringToObject(root, "mqtt_pass", s->mqtt_pass);
     cJSON_AddStringToObject(root, "mqtt_client_id", s->mqtt_client_id);
-    cJSON_AddNumberToObject(root, "log_max_file_size", s->log_max_file_size);
-    cJSON_AddNumberToObject(root, "log_max_files", s->log_max_files);
 
     cJSON *ac_mon = cJSON_CreateObject();
-    cJSON_AddBoolToObject(ac_mon, "enabled", s->ac_mon.enabled);
     cJSON_AddNumberToObject(ac_mon, "v_min", s->ac_mon.v_min);
     cJSON_AddNumberToObject(ac_mon, "v_max", s->ac_mon.v_max);
     cJSON_AddNumberToObject(ac_mon, "f_min", (double)s->ac_mon.f_min);
@@ -548,27 +545,16 @@ static void settings_from_json(const cJSON *root, system_settings_t *s)
     jget_str(root, "mqtt_user", s->mqtt_user, sizeof(s->mqtt_user));
     jget_str(root, "mqtt_pass", s->mqtt_pass, sizeof(s->mqtt_pass));
     jget_str(root, "mqtt_client_id", s->mqtt_client_id, sizeof(s->mqtt_client_id));
-    s->log_max_file_size = (uint32_t)jget_int(root, "log_max_file_size", (int)s->log_max_file_size);
-    s->log_max_files = (uint32_t)jget_int(root, "log_max_files", (int)s->log_max_files);
-    /* Clamp rather than trust the raw input: a 0 or negative value here
-     * would cast to a huge uint32_t (jget_int's return is signed, and a
-     * negative number wraps on the cast above), which for log_max_file_size
-     * means rotation effectively never triggers (log grows without bound),
-     * and for log_max_files means rotate_locked()'s `for (unsigned i =
-     * s_max_files - 1; ...)` loop in event_log.c counts down from billions
-     * -- a multi-minute hang holding the log's mutex. The upper bounds
-     * mirror event_log.c's own limits: read_whole_file() already refuses to
-     * load a log file bigger than 256KB, and event_log_read_recent() only
-     * ever looks at MAX_SOURCE_FILES (8) files, so anything beyond these
-     * just wastes flash without the log viewer ever seeing it. */
-    if (s->log_max_file_size < 4096) s->log_max_file_size = 4096;
-    if (s->log_max_file_size > 262144) s->log_max_file_size = 262144;
-    if (s->log_max_files < 1) s->log_max_files = 1;
-    if (s->log_max_files > 8) s->log_max_files = 8;
+    /* No more log_max_file_size/log_max_files here -- the old byte-size +
+     * rotation-count scheme (and the clamping this used to need against a
+     * 0/negative value wrapping into a huge uint32_t -- see git history)
+     * is gone. event_log.c now just keeps a fixed 50 most-recent entries,
+     * nothing web-editable about it any more. */
 
     const cJSON *ac_mon = cJSON_GetObjectItemCaseSensitive(root, "ac_mon");
     if (ac_mon) {
-        s->ac_mon.enabled = jget_bool(ac_mon, "enabled", s->ac_mon.enabled);
+        /* No more "enabled" here -- AC1 monitoring has no on/off setting,
+         * see ac_mon_settings_t's comment in app_types.h. */
         s->ac_mon.v_min = jget_int(ac_mon, "v_min", s->ac_mon.v_min);
         s->ac_mon.v_max = jget_int(ac_mon, "v_max", s->ac_mon.v_max);
         s->ac_mon.f_min = jget_float(ac_mon, "f_min", s->ac_mon.f_min);
@@ -759,6 +745,14 @@ static esp_err_t h_status_get(httpd_req_t *req)
     cJSON_AddStringToObject(wifi, "sta_ip", sta_ip);
     cJSON_AddStringToObject(wifi, "ap_ip", ap_ip);
     cJSON_AddStringToObject(wifi, "ssid", ssid);
+    /* rssi is simply omitted when not connected (nothing to report) --
+     * this vendored cJSON has no cJSON_AddNullToObject()/CreateNull(), and
+     * the web UI's signal-bars icon in app.js already treats a missing
+     * field the same as "hide it" (JS: undefined). */
+    int8_t rssi;
+    if (wifi_manager_get_sta_rssi(&rssi)) {
+        cJSON_AddNumberToObject(wifi, "rssi", rssi);
+    }
     cJSON_AddItemToObject(root, "wifi", wifi);
 
     cJSON *ac_mon = cJSON_CreateObject();

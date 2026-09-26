@@ -874,7 +874,6 @@ esp_err_t plug_manager_update_settings(const system_settings_t *in)
     xSemaphoreGive(s_lock);
 
     gpio_inputs_update_settings(&new_settings);
-    event_log_update_limits(new_settings.log_max_file_size, new_settings.log_max_files);
     driver_mqtt_apply_settings(&new_settings);
     ac_monitor_update_settings(&new_settings.ac_mon);
 

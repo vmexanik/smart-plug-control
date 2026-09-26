@@ -28,7 +28,19 @@ static const char *TAG = "ac_monitor";
  * the Wi-Fi radio and can give delayed/noisier readings while Wi-Fi is
  * active, which on this device is always. CONFIG_AC_MON_ADC_GPIO_DEFAULT
  * resolves to whichever unit/channel/conv_mode its value falls into, at
- * compile time; a build-time #error catches anything outside GPIO1-20. */
+ * compile time; a build-time #error catches anything outside GPIO1-20.
+ *
+ * This board's ZMPT101B is wired to GPIO11 (module pin 19, ADC2_CH0),
+ * already routed on the PCB -- moving it to an ADC1 pin would mean cutting
+ * traces, so that was deliberately not done. Recent ESP-IDF versions
+ * reject adc_continuous_config() on ADC2 outright on S3/C3 ("ADC2
+ * continuous mode is no longer supported, please use ADC1";
+ * ESP_ERR_INVALID_ARG) unless CONFIG_ADC_CONTINUOUS_FORCE_USE_ADC2_ON_C3_S3
+ * is set (see sdkconfig.defaults) -- without it, ac_monitor_init() fails at
+ * adc_continuous_config() and this whole module never starts. With it set,
+ * ADC2 continuous sampling works, but keep the Wi-Fi-coexistence caveat
+ * above in mind: it's a known, accepted trade-off here, not a fully
+ * Espressif-recommended configuration. */
 #define AC_MON_ADC_GPIO CONFIG_AC_MON_ADC_GPIO_DEFAULT
 
 #if AC_MON_ADC_GPIO >= 1 && AC_MON_ADC_GPIO <= 10
@@ -216,7 +228,10 @@ static void process_window(size_t n, const ac_mon_settings_t *settings, ac_mon_r
     }
 
     /* --- in-band check --- */
-    if (!settings->enabled || out->freq_hz <= 0.0f) {
+    /* No more settings->enabled gate here -- AC1's whole purpose is
+     * monitoring the mains, so the band check is unconditionally active
+     * whenever there's a real reading (freq_hz > 0). */
+    if (out->freq_hz <= 0.0f) {
         out->in_band = true;
     } else {
         bool v_ok = (out->vrms >= (float)settings->v_min) && (out->vrms <= (float)settings->v_max);

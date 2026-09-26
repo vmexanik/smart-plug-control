@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
-#include <sys/stat.h>
 #include <time.h>
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -12,61 +11,45 @@
 
 static const char *TAG = "event_log";
 
+/* Fixed cap on the number of entries kept, replacing the old byte-size +
+ * multi-file rotation scheme entirely (no more log.txt.1..N, no more
+ * log_max_file_size/log_max_files settings -- see event_log.h and the
+ * README/task history for why: the rename-based rotation in rotate_locked()
+ * was the suspected cause of a device hanging after roughly a day of
+ * uptime on first power-up (fine again after a manual reboot -- consistent
+ * with something going wrong the first time flash/LittleFS accumulated
+ * enough rotated files to actually trigger a rotation, then staying fine
+ * because the freshly-rebooted log started small again). A single
+ * fixed-size file that just keeps its N most recent lines needs no
+ * rename/multi-file bookkeeping at all. 50 is a plain constant, not a
+ * setting -- nothing to get wrong from the web UI here any more. */
+#define EVENT_LOG_MAX_LINES 50
+
 static SemaphoreHandle_t s_lock;
-static uint32_t s_max_file_size = 65536;
-static uint32_t s_max_files = 5;
+
+/* One-time cleanup of rotated files left behind by older firmware
+ * (log.txt.1 .. log.txt.8, see the removed rotate_locked()/MAX_SOURCE_FILES
+ * scheme) so they don't sit on flash forever after an OTA update from a
+ * version that used them. Safe to call even if none exist -- remove() on a
+ * missing file is a harmless no-op. */
+static void remove_legacy_rotated_files(void)
+{
+    for (unsigned i = 1; i <= 8; i++) {
+        char p[64];
+        snprintf(p, sizeof(p), LOG_FILE_PATH ".%u", i);
+        remove(p);
+    }
+}
 
 esp_err_t event_log_init(const system_settings_t *settings)
 {
+    (void)settings; /* no more log_max_file_size/log_max_files to read */
     s_lock = xSemaphoreCreateMutex();
     if (!s_lock) {
         return ESP_ERR_NO_MEM;
     }
-    s_max_file_size = settings->log_max_file_size ? settings->log_max_file_size : 65536;
-    s_max_files = settings->log_max_files ? settings->log_max_files : 5;
+    remove_legacy_rotated_files();
     return ESP_OK;
-}
-
-void event_log_update_limits(uint32_t max_file_size, uint32_t max_files)
-{
-    if (max_file_size == 0 || max_files == 0) {
-        return;
-    }
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_max_file_size = max_file_size;
-    s_max_files = max_files;
-    xSemaphoreGive(s_lock);
-}
-
-static void rotated_path(char *buf, size_t buf_size, unsigned idx)
-{
-    snprintf(buf, buf_size, LOG_FILE_PATH ".%u", idx);
-}
-
-/* Caller must hold s_lock. */
-static void rotate_locked(void)
-{
-    char src[64], dst[64];
-
-    rotated_path(dst, sizeof(dst), s_max_files - 1);
-    remove(dst);
-
-    for (unsigned i = s_max_files - 1; i >= 1; i--) {
-        if (i == 1) {
-            strncpy(src, LOG_FILE_PATH, sizeof(src) - 1);
-            src[sizeof(src) - 1] = '\0';
-        } else {
-            rotated_path(src, sizeof(src), i - 1);
-        }
-        rotated_path(dst, sizeof(dst), i);
-
-        struct stat st;
-        if (stat(src, &st) == 0) {
-            remove(dst);
-            rename(src, dst);
-        }
-        if (i == 1) break; /* unsigned underflow guard */
-    }
 }
 
 /* Appends fixed JSON syntax (not user data -- json_escape_append() below
@@ -114,16 +97,55 @@ static void json_escape_append(char *dst, size_t dst_size, size_t *pos, const ch
     }
 }
 
+static char *read_whole_file(const char *path, size_t *out_len)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) { *out_len = 0; return NULL; }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size <= 0 || size > 256 * 1024) { fclose(f); *out_len = 0; return NULL; }
+    char *buf = malloc(size + 1);
+    if (!buf) { fclose(f); *out_len = 0; return NULL; }
+    size_t rd = fread(buf, 1, size, f);
+    fclose(f);
+    buf[rd] = '\0';
+    *out_len = rd;
+    return buf;
+}
+
+/* Caller must hold s_lock. Rewrites LOG_FILE_PATH so it holds at most the
+ * last EVENT_LOG_MAX_LINES lines of whatever's currently in `lines`
+ * (oldest-first). Uses the same write-to-tmp-then-rename pattern as
+ * storage_save_config() -- a half-written file from a power loss mid-write
+ * is not something a straight in-place rewrite could recover from. */
+static void rewrite_trimmed_locked(char **lines, int n_lines)
+{
+    int start = (n_lines > EVENT_LOG_MAX_LINES) ? (n_lines - EVENT_LOG_MAX_LINES) : 0;
+
+    const char *tmp_path = LOG_FILE_PATH ".tmp";
+    FILE *f = fopen(tmp_path, "w");
+    if (!f) {
+        ESP_LOGE(TAG, "Failed to open %s for trim rewrite", tmp_path);
+        return;
+    }
+    for (int i = start; i < n_lines; i++) {
+        fputs(lines[i], f);
+        fputc('\n', f);
+    }
+    fclose(f);
+
+    remove(LOG_FILE_PATH);
+    if (rename(tmp_path, LOG_FILE_PATH) != 0) {
+        ESP_LOGE(TAG, "Failed to rename %s into place", tmp_path);
+    }
+}
+
 void event_log_append(const char *source, const char *plug_name,
                        const char *action, bool ok, const char *detail)
 {
     if (!s_lock) return;
     xSemaphoreTake(s_lock, portMAX_DELAY);
-
-    struct stat st;
-    if (stat(LOG_FILE_PATH, &st) == 0 && (uint32_t)st.st_size >= s_max_file_size) {
-        rotate_locked();
-    }
 
     FILE *f = fopen(LOG_FILE_PATH, "a");
     if (!f) {
@@ -158,6 +180,28 @@ void event_log_append(const char *source, const char *plug_name,
     fwrite(line, 1, pos, f);
     fclose(f);
 
+    /* Trim to the last EVENT_LOG_MAX_LINES lines. Reads the whole (small --
+     * capped at 50 lines of at most ~384 bytes each, well under 20KB)
+     * file back rather than tracking a running count, so a count that got
+     * out of sync (e.g. after a crash mid-write) self-corrects on the very
+     * next append instead of drifting forever. */
+    size_t len;
+    char *buf = read_whole_file(LOG_FILE_PATH, &len);
+    if (buf) {
+        char *lines[EVENT_LOG_MAX_LINES + 1];
+        int n_lines = 0;
+        char *saveptr = NULL;
+        char *ln = strtok_r(buf, "\n", &saveptr);
+        while (ln && n_lines < EVENT_LOG_MAX_LINES + 1) {
+            if (*ln) lines[n_lines++] = ln;
+            ln = strtok_r(NULL, "\n", &saveptr);
+        }
+        if (n_lines > EVENT_LOG_MAX_LINES) {
+            rewrite_trimmed_locked(lines, n_lines);
+        }
+        free(buf);
+    }
+
     xSemaphoreGive(s_lock);
 }
 
@@ -165,30 +209,9 @@ esp_err_t event_log_clear(void)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
     remove(LOG_FILE_PATH);
-    for (unsigned i = 1; i < s_max_files; i++) {
-        char p[64];
-        rotated_path(p, sizeof(p), i);
-        remove(p);
-    }
+    remove_legacy_rotated_files();
     xSemaphoreGive(s_lock);
     return ESP_OK;
-}
-
-static char *read_whole_file(const char *path, size_t *out_len)
-{
-    FILE *f = fopen(path, "r");
-    if (!f) { *out_len = 0; return NULL; }
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (size <= 0 || size > 256 * 1024) { fclose(f); *out_len = 0; return NULL; }
-    char *buf = malloc(size + 1);
-    if (!buf) { fclose(f); *out_len = 0; return NULL; }
-    size_t rd = fread(buf, 1, size, f);
-    fclose(f);
-    buf[rd] = '\0';
-    *out_len = rd;
-    return buf;
 }
 
 esp_err_t event_log_read_recent(char *out_json, size_t out_size, int max_lines)
@@ -197,33 +220,15 @@ esp_err_t event_log_read_recent(char *out_json, size_t out_size, int max_lines)
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
 
-    /* Gather line pointers oldest -> newest from rotated files then current. */
-    #define MAX_SOURCE_FILES 8
-    char *file_bufs[MAX_SOURCE_FILES] = {0};
-    int n_files = 0;
+    size_t len;
+    char *buf = read_whole_file(LOG_FILE_PATH, &len);
 
-    unsigned oldest_idx = (s_max_files > 1) ? (s_max_files - 1) : 0;
-    for (unsigned i = oldest_idx; i >= 1 && n_files < MAX_SOURCE_FILES - 1; i--) {
-        char p[64];
-        rotated_path(p, sizeof(p), i);
-        size_t len;
-        char *b = read_whole_file(p, &len);
-        if (b) file_bufs[n_files++] = b;
-        if (i == 1) break;
-    }
-    {
-        size_t len;
-        char *b = read_whole_file(LOG_FILE_PATH, &len);
-        if (b) file_bufs[n_files++] = b;
-    }
-
-    /* Collect all non-empty line pointers across the loaded buffers. */
-    #define MAX_LINES_TOTAL 2048
-    static char *all_lines[MAX_LINES_TOTAL];
+    #define MAX_LINES_TOTAL (EVENT_LOG_MAX_LINES + 1)
+    char *all_lines[MAX_LINES_TOTAL];
     int n_lines = 0;
-    for (int i = 0; i < n_files; i++) {
+    if (buf) {
         char *saveptr = NULL;
-        char *line = strtok_r(file_bufs[i], "\n", &saveptr);
+        char *line = strtok_r(buf, "\n", &saveptr);
         while (line && n_lines < MAX_LINES_TOTAL) {
             if (*line) all_lines[n_lines++] = line;
             line = strtok_r(NULL, "\n", &saveptr);
@@ -250,7 +255,7 @@ esp_err_t event_log_read_recent(char *out_json, size_t out_size, int max_lines)
     out_json[pos++] = ']';
     out_json[pos] = '\0';
 
-    for (int i = 0; i < n_files; i++) free(file_bufs[i]);
+    if (buf) free(buf);
 
     xSemaphoreGive(s_lock);
     return ESP_OK;

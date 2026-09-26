@@ -86,6 +86,14 @@ void wifi_manager_get_sta_password(char *pass_out, size_t pass_size);
  * always up. */
 bool wifi_manager_sta_config_error(void);
 
+/* Fills *out with the current STA link's RSSI (dBm, negative -- e.g. -55 is
+ * a strong signal, -85 is barely hanging on) via esp_wifi_sta_get_ap_info().
+ * Returns false (out left untouched) if not currently connected -- same
+ * "false means don't trust *out" convention as wifi_manager_get_sta_ip_info()
+ * / wifi_manager_get_sta_dns() above. For the web UI's signal-bars icon
+ * (GET /api/status -> wifi.rssi). */
+bool wifi_manager_get_sta_rssi(int8_t *out);
+
 #define WIFI_SCAN_MAX_RESULTS 20
 
 typedef struct {

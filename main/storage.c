@@ -75,15 +75,13 @@ void storage_default_config(app_config_t *cfg)
     cfg->settings.mqtt_uri[0] = '\0';
     strncpy(cfg->settings.mqtt_client_id, "smart-plug-hub", sizeof(cfg->settings.mqtt_client_id) - 1);
 
-    cfg->settings.log_max_file_size = 65536;
-    cfg->settings.log_max_files = 5;
-
-    /* Off by default -- no ZMPT101B connected means every reading would be
-     * "no mains", which isn't a useful default for anyone who hasn't wired
-     * one up. Band is a generic +-10%/+-2% starting point around 230V/50Hz;
-     * meant to be tuned per-installation from the web UI, not treated as a
-     * real spec. */
-    cfg->settings.ac_mon.enabled = false;
+    /* Always active (no enable/disable setting -- see ac_mon_settings_t's
+     * comment in app_types.h). Band is a generic +-10%/+-2% starting point
+     * around 230V/50Hz; meant to be tuned per-installation from the web
+     * UI, not treated as a real spec. Before ZMPT101B is wired up (or if
+     * it's unplugged), every reading is simply "no mains" (mains_present
+     * false), which already reports as in_band=true -- nothing to protect
+     * against -- so there's no bad-default risk in leaving this always on. */
     cfg->settings.ac_mon.v_min = 198;
     cfg->settings.ac_mon.v_max = 253;
     cfg->settings.ac_mon.f_min = 49.5f;
@@ -219,11 +217,8 @@ static cJSON *settings_to_json(const system_settings_t *s)
     cJSON_AddStringToObject(root, "mqtt_user", s->mqtt_user);
     cJSON_AddStringToObject(root, "mqtt_pass", s->mqtt_pass);
     cJSON_AddStringToObject(root, "mqtt_client_id", s->mqtt_client_id);
-    cJSON_AddNumberToObject(root, "log_max_file_size", s->log_max_file_size);
-    cJSON_AddNumberToObject(root, "log_max_files", s->log_max_files);
 
     cJSON *ac_mon = cJSON_CreateObject();
-    cJSON_AddBoolToObject(ac_mon, "enabled", s->ac_mon.enabled);
     cJSON_AddNumberToObject(ac_mon, "v_min", s->ac_mon.v_min);
     cJSON_AddNumberToObject(ac_mon, "v_max", s->ac_mon.v_max);
     cJSON_AddNumberToObject(ac_mon, "f_min", (double)s->ac_mon.f_min);
@@ -261,12 +256,9 @@ static void settings_from_json(const cJSON *root, system_settings_t *s, const sy
     json_get_str(root, "mqtt_user", s->mqtt_user, sizeof(s->mqtt_user));
     json_get_str(root, "mqtt_pass", s->mqtt_pass, sizeof(s->mqtt_pass));
     json_get_str(root, "mqtt_client_id", s->mqtt_client_id, sizeof(s->mqtt_client_id));
-    s->log_max_file_size = (uint32_t)json_get_int(root, "log_max_file_size", (int)s->log_max_file_size);
-    s->log_max_files = (uint32_t)json_get_int(root, "log_max_files", (int)s->log_max_files);
 
     const cJSON *ac_mon = cJSON_GetObjectItemCaseSensitive(root, "ac_mon");
     if (ac_mon) {
-        s->ac_mon.enabled = json_get_bool(ac_mon, "enabled", s->ac_mon.enabled);
         s->ac_mon.v_min = json_get_int(ac_mon, "v_min", s->ac_mon.v_min);
         s->ac_mon.v_max = json_get_int(ac_mon, "v_max", s->ac_mon.v_max);
         s->ac_mon.f_min = json_get_float(ac_mon, "f_min", s->ac_mon.f_min);
