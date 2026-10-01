@@ -91,44 +91,47 @@ menu "Smart Plug Control"
     menu "AC mains monitor (ZMPT101B)"
         config AC_MON_ADC_GPIO_DEFAULT
             int "AC mains monitor ADC input GPIO (this is the 'AC1' pin)"
-            default 11
-            range 1 20
+            default 10
+            range 1 10
             help
-                ESP32-S3 ADC-capable pins split into two independent units:
-                GPIO1-10 = ADC1 (channel = GPIO - 1), GPIO11-20 = ADC2
-                (channel = GPIO - 11). ac_monitor.c derives the right
-                adc_unit_t/adc_channel_t from whichever GPIO you set here,
-                at compile time.
+                ZMPT101B output pin. zmpt101b.c uses adc_continuous (DMA),
+                which on ESP32-S3 works only on ADC1 = GPIO1-10
+                (channel = GPIO - 1). Default GPIO10 = ADC1_CH9. If the
+                board is routed to GPIO11 (ADC2), bridge GPIO11 to GPIO10.
 
-                Strongly prefer an ADC1 pin (GPIO1-10) if you have the
-                choice: ADC2 is shared with the Wi-Fi radio, and Wi-Fi is
-                always active on this device, so continuous-mode ADC2
-                sampling (used here) can be delayed or glitched by radio
-                activity -- readings may be noisier or occasionally miss a
-                window. Using GPIO11 (ADC2 channel 0) here is a known,
-                accepted tradeoff for this board revision (physical AC1 net
-                is already routed there) -- ac_monitor.c logs a warning at
-                boot when this resolves to an ADC2 pin.
-
-        config AC_MON_VOLTS_PER_ADC_RMS_COUNT_X10000
-            int "Calibration: volts per ADC RMS count, x10000"
-            default 5500
+        config AC_MON_VOLTS_PER_RMS_MV_X10000
+            int "Calibration: volts of mains per millivolt RMS, x10000"
+            default 6010
             range 1 1000000
             help
                 Kconfig has no float type, so this is the real coefficient
-                multiplied by 10000 (5500 here = 0.5500). ac_monitor.c
+                multiplied by 10000 (5750 here = 0.5750). ac_monitor.c
                 divides it back down at compile time.
 
+                NOTE: this option was renamed from
+                AC_MON_VOLTS_PER_ADC_RMS_COUNT_X10000. If you calibrated
+                before ac_monitor.c switched to adc_cali (raw-count-to-
+                millivolt conversion via this chip's own eFuse calibration
+                data), that old value is for a different unit (volts per
+                raw ADC count, not volts per millivolt RMS) and must NOT be
+                reused here -- recalibrate from scratch. The rename is
+                deliberate, so an old sdkconfig entry under the previous
+                name is simply ignored instead of silently feeding a
+                wrong-unit number into the new formula.
+
                 The ZMPT101B module's own trim pot sets its gain, so this
-                number is different for every physical board -- there is no
-                single correct default, 0.55 is only a starting guess.
+                number is different for every physical board -- there is
+                no single correct default; 0.575 (230V at an assumed 400mV
+                RMS module output) is only a starting guess.
 
                 To calibrate: set AC_CAL_ENABLE to 1 near the top of
                 ac_monitor.c, set AC_CAL_VRMS there to the real mains
                 voltage read off a multimeter, reflash, and read the
                 computed coefficient from the boot log ("CAL: volts_per_
-                adc_rms_count = ..."). Multiply that number by 10000, put
-                it here, set AC_CAL_ENABLE back to 0.
+                rms_mv = ..."). Take a few readings across a session, not
+                just one (see ac_monitor.c's sampling-backend-history
+                comment), multiply the value you settle on by 10000, put it
+                here, set AC_CAL_ENABLE back to 0.
     endmenu
 
     menu "Status LED"

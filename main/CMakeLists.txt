@@ -18,6 +18,7 @@ idf_component_register(
         "led_status.c"
         "captive_dns.c"
         "ac_monitor.c"
+        "zmpt101b.c"
     INCLUDE_DIRS "."
     EMBED_FILES
         "web/index.html"

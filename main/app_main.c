@@ -144,9 +144,11 @@ void app_main(void)
     ESP_ERROR_CHECK(gpio_inputs_init(&cfg.settings, plug_manager_on_input_change));
     BOOT_WDT_STEP();
 
-    /* AC mains voltage/frequency monitor (ZMPT101B on GPIO7/ADC1_CH6) --
-     * not treated as fatal if it fails to start: this is an optional
-     * sensor, most of the firmware works fine without it. */
+    /* AC mains voltage/frequency monitor (ZMPT101B -- pin/ADC unit/channel
+     * are resolved from CONFIG_AC_MON_ADC_GPIO_DEFAULT in ac_monitor.c, not
+     * hardcoded here; this board's default is GPIO11/ADC2_CH0) -- not
+     * treated as fatal if it fails to start: this is an optional sensor,
+     * most of the firmware works fine without it. */
     if (ac_monitor_init(&cfg.settings.ac_mon, plug_manager_on_ac_mon_change) != ESP_OK) {
         ESP_LOGW(TAG, "could not start AC mains monitor");
     }
