@@ -680,6 +680,8 @@ static esp_err_t h_ac_calibrate(httpd_req_t *req)
 #define OTA_CHUNK 4096
 static volatile bool s_ota_busy = false;
 
+bool web_server_ota_busy(void) { return s_ota_busy; }
+
 static esp_err_t h_ota_info(httpd_req_t *req)
 {
     const esp_partition_t *run = esp_ota_get_running_partition();
@@ -785,6 +787,7 @@ static esp_err_t h_ota_post(httpd_req_t *req)
     }
     got = (size_t)r;
 
+    int last_pct = 0;
     while (got < total) {
         size_t want = total - got;
         if (want > OTA_CHUNK) want = OTA_CHUNK;
@@ -797,6 +800,11 @@ static esp_err_t h_ota_post(httpd_req_t *req)
             goto fail;
         }
         got += (size_t)r;
+        const int pct = (int)((uint64_t)got * 100 / total);
+        if (pct / 10 != last_pct / 10) {
+            last_pct = pct;
+            ESP_LOGI(TAG, "OTA: %d%% (%u/%u)", pct, (unsigned)got, (unsigned)total);
+        }
     }
 
     begun = false; /* esp_ota_end() consumes the handle either way */
@@ -1023,6 +1031,9 @@ static esp_err_t h_wifi_get(httpd_req_t *req)
     cJSON_AddBoolToObject(root, "config_error", wifi_manager_sta_config_error());
     cJSON_AddStringToObject(root, "sta_ip", sta_ip);
     cJSON_AddStringToObject(root, "ap_ip", ap_ip);
+    char ap_ssid[33];
+    wifi_manager_get_ap_ssid(ap_ssid, sizeof(ap_ssid));
+    cJSON_AddStringToObject(root, "ap_ssid", ap_ssid);
     return send_json(req, root, 200);
 }
 

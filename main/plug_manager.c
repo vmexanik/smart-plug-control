@@ -16,6 +16,7 @@
 #include "driver_zigbee.h"
 #include "wifi_manager.h"
 #include "ac_monitor.h"
+#include "web_server.h"
 
 static const char *TAG = "plug_manager";
 
@@ -199,6 +200,10 @@ static void metrics_poll_task(void *arg)
          * this is that same guard applied every cycle, not just the
          * first. */
         if (!wifi_manager_is_connected()) {
+            continue;
+        }
+        /* Firmware upload in progress: keep the Wi-Fi link free for it. */
+        if (web_server_ota_busy()) {
             continue;
         }
 

@@ -137,10 +137,10 @@
         if (!m.have_reading) {
           acEl.innerHTML = `<span class="hint">ще немає показань…</span>`;
         } else if (!m.mains_present) {
-          acEl.innerHTML = `<span class="hint">сигнал не виявлено (ZMPT101B не підключено або немає мережі)</span>`;
+          acEl.innerHTML = `<span class="hint">Вхід не підключено або немає мережі</span>`;
         } else {
           const bandTxt = '';
-          acEl.innerHTML = `U = ${m.vrms.toFixed(1)} В, f = ${m.freq_hz.toFixed(2)} Гц — ${bandTxt}`;
+          acEl.innerHTML = `U = ${m.vrms.toFixed(1)} В, f = ${m.freq_hz.toFixed(2)} Гц`;
         }
       }
     } catch (e) {
@@ -905,7 +905,7 @@
 
   function renderCalInfo(k) {
     $('#ac-cal-info').textContent = (typeof k === 'number')
-      ? `Поточний коефіцієнт: ${k.toFixed(4)} В на мВ` : '';
+      ? `Поточний коефіцієнт: ${k.toFixed(4)}` : '';
   }
 
   $('#btn-save-settings').addEventListener('click', async () => {
@@ -976,6 +976,7 @@
 
   /* ---------------- firmware update (OTA) ---------------- */
   let fwMaxSize = 0;
+  let fwUploading = false;   /* page polling is paused while a firmware upload runs */
 
   async function loadFwInfo() {
     try {
@@ -1045,6 +1046,7 @@
     bar.value = 0;
     res.className = 'save-result';
     res.textContent = 'Завантаження… не вимикайте пристрій';
+    fwUploading = true;
     try {
       await uploadFirmware(file, (loaded, total) => {
         bar.value = Math.round(loaded * 100 / total);
@@ -1054,6 +1056,7 @@
       res.textContent = 'Прошивку записано. Пристрій перезавантажується…';
       waitForReboot();
     } catch (e) {
+      fwUploading = false;
       res.textContent = 'Помилка: ' + e.message;
       res.className = 'save-result error';
       bar.classList.add('hidden');
@@ -1108,10 +1111,10 @@
         ? '<br><span class="bad">Вичерпано спроби підключення (ймовірно невірний пароль або SSID) — введіть дані ще раз і натисніть "Підключити".</span>'
         : '';
       el.innerHTML = (w.connected
-        ? `<span class="good">STA: Підключено до "${escapeHtml(w.ssid)}" (${w.sta_ip})</span>`
+        ? `<span class="good">STA: "${escapeHtml(w.ssid)}", IP ${w.sta_ip}</span>`
         : `<span class="bad">STA: Не підключено${w.ssid ? ` (збережено SSID "${escapeHtml(w.ssid)}")` : ''}</span>`) +
         failedNote +
-        `<br>AP: Точка доступу для налаштування: IP ${w.ap_ip}`;
+        `<br>AP: ${w.ap_ssid ? `${escapeHtml(w.ap_ssid)}, ` : ''}IP ${w.ap_ip}`;
       /* Prefill both fields with the real stored values -- otherwise
        * clicking "Підключити" without retyping the password resubmits an
        * empty one and silently breaks a working connection. */
@@ -1227,14 +1230,14 @@
   /* ---------------- init ---------------- */
   loadPlugs();
   loadStatus();
-  setInterval(loadStatus, 5000);
+  setInterval(() => { if (!fwUploading) loadStatus(); }, 5000);
   /* Power metrics update in the background every ~15s (metrics_poll_task in
    * plug_manager.c) -- refresh the list periodically so wattage readings
    * aren't stuck at whatever they were on page load. Skipped while the edit
    * modal is open so a background reload can't yank a card out from under
    * someone mid-edit. */
   setInterval(() => {
-    if (modal.classList.contains('hidden')) 
+    if (modal.classList.contains('hidden') && !fwUploading)
       loadPlugs();
   }, 10000);
 })();

@@ -341,6 +341,10 @@ esp_err_t wifi_manager_start(void)
     }
 
     ESP_ERROR_CHECK(esp_wifi_start());
+    /* Mains-powered device: no modem sleep. The default WIFI_PS_MIN_MODEM
+     * adds beacon-interval latency to every packet and makes large uploads
+     * (OTA) stall; the web UI also answers noticeably faster without it. */
+    esp_wifi_set_ps(WIFI_PS_NONE);
 
     ESP_LOGI(TAG, "AP SSID: %s (password %s)", ap_cfg.ap.ssid,
              ap_cfg.ap.authmode == WIFI_AUTH_OPEN ? "<open>" : CONFIG_AP_FALLBACK_PASSWORD);
@@ -459,6 +463,18 @@ bool wifi_manager_get_sta_ip_info(esp_netif_ip_info_t *out)
 {
     if (!s_sta_connected || !out) return false;
     return esp_netif_get_ip_info(s_sta_netif, out) == ESP_OK;
+}
+
+void wifi_manager_get_ap_ssid(char *out, size_t out_size)
+{
+    if (!out || out_size == 0) return;
+    out[0] = '\0';
+    wifi_config_t cfg;
+    if (esp_wifi_get_config(WIFI_IF_AP, &cfg) != ESP_OK) return;
+    size_t n = cfg.ap.ssid_len ? cfg.ap.ssid_len : strnlen((const char *)cfg.ap.ssid, sizeof(cfg.ap.ssid));
+    if (n >= out_size) n = out_size - 1;
+    memcpy(out, cfg.ap.ssid, n);
+    out[n] = '\0';
 }
 
 bool wifi_manager_get_ap_ip_info(esp_netif_ip_info_t *out)

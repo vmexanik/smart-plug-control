@@ -141,6 +141,10 @@ bool wifi_manager_get_sta_ip_info(esp_netif_ip_info_t *out);
  * captive_dns.c to know which address to answer every DNS query with. */
 bool wifi_manager_get_ap_ip_info(esp_netif_ip_info_t *out);
 
+/* SSID of the soft-AP as currently configured (e.g. "SmartPlug-A1B2C3").
+ * Writes an empty string on failure. */
+void wifi_manager_get_ap_ssid(char *out, size_t out_size);
+
 /* Fills *out with the STA interface's configured main DNS server (normally
  * handed out by the router's DHCP lease). Returns false (out left
  * untouched) if STA is not connected or no IPv4 DNS server is configured --
