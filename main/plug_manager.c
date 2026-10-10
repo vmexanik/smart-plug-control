@@ -23,12 +23,6 @@ static app_config_t s_cfg;
 static SemaphoreHandle_t s_lock;
 static QueueHandle_t s_action_queue;
 static uint32_t s_next_id = 1;
-/* Latest in-band status from ac_monitor.c (see plug_manager_on_ac_mon_change()
- * below). Starts true -- matches ac_monitor.c's own "nothing to protect
- * against yet" default before its first real reading, so AC1-bound plugs
- * aren't held off at boot waiting for a sample window. Guarded by s_lock,
- * same as the rest of s_cfg. */
-static bool s_ac_mon_in_band = true;
 
 typedef struct {
     uint32_t plug_id;
@@ -432,27 +426,27 @@ static void enqueue_action(uint32_t plug_id, bool on, const char *source)
 
 /* Anti-chatter turn-ON delay sweep interval (see on_delay_task() below).
  * Short enough to keep the extra ON latency it adds negligible next to
- * typical on_delay_ms values (hundreds of ms to a few seconds), long
+ * typical on_delay_s values (seconds to minutes), long
  * enough not to be a meaningful CPU/lock-contention cost sitting in the
  * background forever. */
-#define ON_DELAY_SWEEP_INTERVAL_MS 50
+#define ON_DELAY_SWEEP_INTERVAL_MS 250
 #define ON_DELAY_TASK_STACK        3072
 
 /* Applies a computed desired on/off state to one plug (targets[]/desired[]
  * entries from plug_manager_on_input_change()/plug_manager_sync_all_from_
  * inputs()/plug_manager_on_ac_mon_change() below), honoring that plug's
- * anti-chatter on_delay_ms (see app_types.h's doc comment on it): OFF is
+ * anti-chatter on_delay_s (see app_types.h's doc comment on it): OFF is
  * always dispatched immediately -- turning off must never be held up, both
  * for safety and because that's the whole point of this feature ("вимикається
  * миттєво, вмикається з таймаутом"). ON is dispatched immediately only when
- * on_delay_ms == 0 (i.e. the feature is off for this plug, same behavior as
+ * on_delay_s == 0 (i.e. the feature is off for this plug, same behavior as
  * before it existed); otherwise it's deferred by recording a deadline that
  * on_delay_task() below picks up once it elapses.
  *
  * Called with no lock held (same discipline as enqueue_action()); takes
  * s_lock itself only for the bookkeeping. desired_on here is already the
- * *post-inversion* result (`level ^ invert`, computed by every caller before
- * reaching this function) -- that's what makes this delay automatically
+ * *post-inversion* result (`level ^ invert`, computed by every caller
+ * before reaching this function) -- that's what makes this delay automatically
  * inversion-aware without any separate handling: it always delays whichever
  * physical edge `invert` maps to "this plug should be on", never the other
  * one, regardless of how `invert` is set. */
@@ -471,14 +465,14 @@ static void apply_desired_state(uint32_t plug_id, bool desired_on, const char *s
     }
 
     bool have_plug = false;
-    uint32_t delay_ms = 0;
+    uint32_t delay_s = 0;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     int idx = find_index_locked(plug_id);
     if (idx >= 0) {
         have_plug = true;
-        delay_ms = s_cfg.plugs[idx].on_delay_ms;
-        if (delay_ms > 0) {
-            s_cfg.plugs[idx].on_delay_due_us = esp_timer_get_time() + (int64_t)delay_ms * 1000;
+        delay_s = s_cfg.plugs[idx].on_delay_s;
+        if (delay_s > 0) {
+            s_cfg.plugs[idx].on_delay_due_us = esp_timer_get_time() + (int64_t)delay_s * 1000000;
             strncpy(s_cfg.plugs[idx].on_delay_source, source, sizeof(s_cfg.plugs[idx].on_delay_source) - 1);
             s_cfg.plugs[idx].on_delay_source[sizeof(s_cfg.plugs[idx].on_delay_source) - 1] = '\0';
         }
@@ -487,7 +481,7 @@ static void apply_desired_state(uint32_t plug_id, bool desired_on, const char *s
 
     if (!have_plug) return; /* plug vanished (deleted) between snapshot and here */
 
-    if (delay_ms == 0) {
+    if (delay_s == 0) {
         enqueue_action(plug_id, true, source);
     }
     /* else: deferred -- on_delay_task() enqueues it once its deadline is reached. */
@@ -498,7 +492,7 @@ static void apply_desired_state(uint32_t plug_id, bool desired_on, const char *s
  * rather than one esp_timer per plug -- simpler lifecycle (nothing to
  * create/destroy as plugs are added/deleted/edited) at the cost of up to
  * ON_DELAY_SWEEP_INTERVAL_MS of extra latency on top of the configured
- * on_delay_ms, which is negligible for this feature's purpose. */
+ * on_delay_s, which is negligible for this feature's purpose. */
 static void on_delay_task(void *arg)
 {
     for (;;) {
@@ -616,15 +610,13 @@ esp_err_t plug_manager_start_background_tasks(void)
 /* AC1 has no physical GPIO on this board revision (see input_id_t's comment
  * in app_types.h) -- its logical "level" is the AC mains monitor's in-band
  * status directly: active exactly when the last ZMPT101B reading's voltage
- * AND frequency are within the configured ac_mon band (process_window() in
- * ac_monitor.c already folds "monitoring disabled" / "no signal yet" into
- * in_band == true, so an AC1-bound plug just behaves as "always on" until
- * the user enables AC mains monitoring from the web UI). DC1/DC2 read their
- * level from gpio_inputs.c as before. Caller must hold s_lock (s_ac_mon_in_band
- * is guarded by it, same as s_cfg). */
+ * AND frequency are within the configured ac_mon band. No mains / no valid
+ * frequency counts as out of band. DC1/DC2 read their levels from
+ * gpio_inputs.c. No input hold time: the per-plug turn-ON delay
+ * (on_delay_s) is applied after the plug's invert flag. */
 static bool input_level_locked(input_id_t id)
 {
-    if (id == INPUT_AC1) return s_ac_mon_in_band;
+    if (id == INPUT_AC1) return ac_monitor_get_level();
     return gpio_inputs_get_level(id);
 }
 
@@ -662,9 +654,8 @@ void plug_manager_sync_all_from_inputs(void)
         plug_t *p = &s_cfg.plugs[i];
         if (!p->enabled || p->input == INPUT_NONE) continue;
         if (!gpio_inputs_is_enabled(p->input)) continue;
-        bool level = input_level_locked(p->input);
         targets[n] = p->id;
-        desired[n] = level ^ p->invert;
+        desired[n] = input_level_locked(p->input) ^ p->invert;
         n++;
     }
     xSemaphoreGive(s_lock);
@@ -676,15 +667,13 @@ void plug_manager_sync_all_from_inputs(void)
 
 /* ac_monitor.c callback target -- fired only on an actual in-band/out-of-band
  * transition (see ac_monitor.h). Re-evaluates every AC1-bound plug against
- * the new in_band status (see input_level_locked() above -- that IS the
- * AC1 level now, there's no separate physical line to combine it with).
+ * the new in_band status.
  * Plugs bound to other inputs, or not bound to any input, are untouched --
  * this is deliberately scoped to AC1 only, same as
  * plug_manager_on_input_change()'s own per-input filtering. */
 void plug_manager_on_ac_mon_change(bool in_band)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_ac_mon_in_band = in_band;
     uint32_t targets[MAX_PLUGS];
     bool desired[MAX_PLUGS];
     size_t n = 0;
@@ -875,11 +864,20 @@ esp_err_t plug_manager_update_settings(const system_settings_t *in)
 
     gpio_inputs_update_settings(&new_settings);
     driver_mqtt_apply_settings(&new_settings);
-    ac_monitor_update_settings(&new_settings.ac_mon);
+    ac_monitor_update_settings(&new_settings);
 
     event_log_append(LOG_SRC_SYSTEM, "-", "settings_updated", true, NULL);
 
     plug_manager_sync_all_from_inputs();
+    return err;
+}
+
+esp_err_t plug_manager_set_ac_cal_k(float k)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_cfg.settings.ac_mon.cal_k = k;
+    esp_err_t err = save_locked();
+    xSemaphoreGive(s_lock);
     return err;
 }
 

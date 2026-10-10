@@ -65,6 +65,12 @@ esp_err_t zmpt101b_get_window(zmpt101b_handle_t handle, float *out, uint32_t max
  */
 esp_err_t zmpt101b_auto_calibrate(zmpt101b_handle_t handle, float reference_v_rms, uint32_t duration_ms, float *out_new_factor);
 
+/** @brief Змінити коефіцієнт калібрування на льоту (згладжена напруга перемасштабується) */
+esp_err_t zmpt101b_set_calibration_factor(zmpt101b_handle_t handle, float k);
+
+/** @brief Поточний коефіцієнт калібрування (В мережі на мВ RMS) */
+float zmpt101b_get_calibration_factor(zmpt101b_handle_t handle);
+
 /** @brief Деініціалізація модуля */
 esp_err_t zmpt101b_deinit(zmpt101b_handle_t handle);
 

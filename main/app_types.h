@@ -14,6 +14,9 @@ extern "C" {
 #define PAYLOAD_LEN          32
 #define AUTH_LEN             32
 
+/* Per-plug turn-ON delay limit, seconds (plug_t.on_delay_s). */
+#define PLUG_ON_DELAY_S_MAX  600
+
 #define STORAGE_MOUNT_POINT  "/storage"
 #define CONFIG_FILE_PATH     STORAGE_MOUNT_POINT "/config.json"
 #define LOG_FILE_PATH        STORAGE_MOUNT_POINT "/log.txt"
@@ -123,7 +126,7 @@ typedef struct {
     input_id_t input;           /* which physical input drives this plug, INPUT_NONE = manual only */
     bool invert;                /* invert the input level before applying it */
 
-    /* Anti-chatter delay (ms) before actually switching this plug ON --
+    /* Turn-ON delay (seconds, 0..PLUG_ON_DELAY_S_MAX) before actually switching this plug ON --
      * removes relay-contact bounce on power-up. OFF is always dispatched
      * immediately, never delayed; only ON ever waits. 0 = no delay (ON
      * applies immediately, same behavior as before this setting existed).
@@ -132,7 +135,7 @@ typedef struct {
      * resulting desired state, so this delay automatically follows
      * whichever physical edge `invert` maps to "on" -- no separate
      * inversion handling is needed here. */
-    uint32_t on_delay_ms;
+    uint32_t on_delay_s;
     driver_type_t driver;
     http_driver_cfg_t  http;
     mqtt_driver_cfg_t  mqtt;
@@ -162,7 +165,7 @@ typedef struct {
      * piling up doomed requests when the device is known to be offline. */
     bool reachable;
 
-    /* Anti-chatter ON-delay bookkeeping (see on_delay_ms above), guarded by
+    /* Anti-chatter ON-delay bookkeeping (see on_delay_s above), guarded by
      * plug_manager.c's s_lock same as the rest of this struct -- not
      * persisted, reset to "nothing pending" on every boot.
      * on_delay_due_us: 0 means no delayed ON is currently pending for this
@@ -209,11 +212,12 @@ typedef struct {
     int   v_max;    /* volts */
     float f_min;    /* Hz, 0.01 precision */
     float f_max;    /* Hz, 0.01 precision */
+    float cal_k;    /* voltmeter calibration, volts of mains per mV RMS at the ADC pin. Set only via
+                     * POST /api/ac/calibrate (never from /api/settings); 0 = use the Kconfig default */
 } ac_mon_settings_t;
 
 typedef struct {
     input_cfg_t inputs[INPUT_COUNT_PHYSICAL];
-    uint32_t debounce_ms;
     uint32_t poll_interval_ms;
     ac_mon_settings_t ac_mon;
 

@@ -20,7 +20,8 @@ static const char *TAG = "ac_monitor";
  * this file is only the glue between that driver and the rest of the
  * firmware: it owns the AC1 pin choice, turns zmpt101b_data_t into
  * ac_mon_reading_t, applies the v_min/v_max/f_min/f_max band from the
- * settings and fires the in-band change callback.
+ * settings, fires the change
+ * callback, and exposes the web-UI voltmeter calibration.
  *
  * adc_continuous on ESP32-S3 only works on ADC1, so the ZMPT101B output
  * must be on GPIO1-10 (ADC1 channel = GPIO - 1). The default is GPIO10
@@ -34,10 +35,11 @@ static const char *TAG = "ac_monitor";
 #error "CONFIG_AC_MON_ADC_GPIO_DEFAULT must be an ADC1 GPIO (1-10): ADC continuous mode does not work on ADC2 on ESP32-S3"
 #endif
 
-/* Calibration: volts of mains per millivolt RMS at the ADC pin (after
- * adc_cali). Kconfig has no float type, so the option is coefficient x10000.
- * Recalibrate on hardware with zmpt101b_auto_calibrate(handle, <multimeter V>, 2000, &k)
- * and put k*10000 into CONFIG_AC_MON_VOLTS_PER_RMS_MV_X10000. */
+/* Default calibration: volts of mains per millivolt RMS at the ADC pin
+ * (after adc_cali). Kconfig has no float type, so the option is the
+ * coefficient x10000. This is only the factory default -- the real value
+ * is the one stored in settings->ac_mon.cal_k, set from the web UI
+ * (ac_monitor_calibrate()); cal_k == 0 means "use this default". */
 #define AC_MON_CAL_FACTOR (CONFIG_AC_MON_VOLTS_PER_RMS_MV_X10000 / 10000.0f)
 
 /* Debug aid: 1 = periodically log the driver's full diagnostic record. */
@@ -66,15 +68,13 @@ static const char *TAG = "ac_monitor";
 #define CLIP_RAW_LO 45
 
 static SemaphoreHandle_t s_lock;
-static ac_mon_settings_t s_settings;
+static system_settings_t s_settings;
 static ac_mon_reading_t s_reading;
 static ac_mon_change_cb_t s_on_change;
 static zmpt101b_handle_t s_dev;
-/* Tracks the in_band value last reported to s_on_change, so the callback
- * only fires on an actual transition. Starts true (matches the "nothing to
- * protect against yet" default) so plugs aren't gated off before the first
- * window completes. */
-static bool s_last_in_band = true;
+/* Level last reported to s_on_change, so the callback only fires on an
+ * actual transition. */
+static bool s_last_level = false;
 
 static void build_reading(const zmpt101b_data_t *d, const ac_mon_settings_t *st, ac_mon_reading_t *out)
 {
@@ -84,7 +84,9 @@ static void build_reading(const zmpt101b_data_t *d, const ac_mon_settings_t *st,
 
     if (d->vpp_mv < NO_MAINS_AMPLITUDE_MV) {
         out->mains_present = false;
-        out->in_band = true; /* nothing to protect against if there's no signal at all */
+        /* No mains = 0 V = out of band (also what an unplugged sensor looks
+         * like): in_band false, vrms/freq_hz stay 0 from the memset above. */
+        out->in_band = false;
         return;
     }
 
@@ -92,11 +94,13 @@ static void build_reading(const zmpt101b_data_t *d, const ac_mon_settings_t *st,
     out->vrms = d->voltage_rms;
     out->freq_hz = d->frequency_hz;
 
-    /* AC1 monitoring has no enable flag -- the band check is always active
-     * whenever there is a real reading. freq_hz == 0 means the driver has
-     * not got a reliable frequency yet; don't flag that as out-of-band. */
+    /* AC1 monitoring has no enable flag -- the band check is always active.
+     * No valid frequency (the driver zeroes it when the voltage is below its
+     * threshold or no clean zero crossings were found, e.g. a floating
+     * input) means there is no usable mains either: out of band, same as
+     * 0 V. The voltage band is always checked, never skipped. */
     if (out->freq_hz <= 0.0f) {
-        out->in_band = true;
+        out->in_band = false;
     } else {
         const bool v_ok = (out->vrms >= (float)st->v_min) && (out->vrms <= (float)st->v_max);
         const bool f_ok = (out->freq_hz >= st->f_min) && (out->freq_hz <= st->f_max);
@@ -107,9 +111,6 @@ static void build_reading(const zmpt101b_data_t *d, const ac_mon_settings_t *st,
 static void ac_monitor_task(void *arg)
 {
     (void)arg;
-#if AC_MON_DEBUG_LOG
-    uint32_t dbg_n = 0;
-#endif
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));
 
@@ -118,38 +119,30 @@ static void ac_monitor_task(void *arg)
 
         ac_mon_settings_t settings_snapshot;
         xSemaphoreTake(s_lock, portMAX_DELAY);
-        settings_snapshot = s_settings;
+        settings_snapshot = s_settings.ac_mon;
         xSemaphoreGive(s_lock);
 
         ac_mon_reading_t reading;
         build_reading(&d, &settings_snapshot, &reading);
 
+        /* The AC1 level is the instant in-band verdict; turn-ON settling is
+         * the per-plug on_delay_s (OFF is always immediate). */
+        reading.level = reading.in_band;
+
         xSemaphoreTake(s_lock, portMAX_DELAY);
         s_reading = reading;
         xSemaphoreGive(s_lock);
 
-#if AC_MON_DEBUG_LOG
-        if (++dbg_n % AC_MON_DEBUG_LOG_EVERY_N == 0) {
-            const bool clip = d.adc_raw_max >= CLIP_RAW_HI || d.adc_raw_min <= CLIP_RAW_LO;
-            ESP_LOGI(TAG, "V=%.2f F=%.2f (raw %.2f, zc=%lu) DC=%.1fmV Vpp=%.1fmV noise=%.1fmV "
-                          "fs_adc=%.0fHz ovf=%lu mains=%d in_band=%d%s",
-                     (double)d.voltage_rms, (double)d.frequency_hz, (double)d.freq_raw_hz,
-                     (unsigned long)d.zc_count, (double)d.dc_offset_mv, (double)d.vpp_mv,
-                     (double)d.noise_mv, (double)d.adc_rate_hz, (unsigned long)d.pool_overflows,
-                     (int)reading.mains_present, (int)reading.in_band, clip ? "  !CLIP" : "");
-        }
-#endif
-
         /* Callback outside s_lock (plug_manager takes its own lock; never
          * nest locks across modules). Only on an actual transition. */
-        if (reading.in_band != s_last_in_band) {
-            s_last_in_band = reading.in_band;
-            if (s_on_change) s_on_change(reading.in_band);
+        if (reading.level != s_last_level) {
+            s_last_level = reading.level;
+            if (s_on_change) s_on_change(reading.level);
         }
     }
 }
 
-esp_err_t ac_monitor_init(const ac_mon_settings_t *settings, ac_mon_change_cb_t on_change)
+esp_err_t ac_monitor_init(const system_settings_t *settings, ac_mon_change_cb_t on_change)
 {
     s_lock = xSemaphoreCreateMutex();
     if (!s_lock) return ESP_ERR_NO_MEM;
@@ -157,13 +150,13 @@ esp_err_t ac_monitor_init(const ac_mon_settings_t *settings, ac_mon_change_cb_t 
     s_settings = *settings;
     memset(&s_reading, 0, sizeof(s_reading));
     s_on_change = on_change;
-    s_last_in_band = true;
+    s_last_level = false;
 
     const zmpt101b_config_t cfg = {
         .adc_unit = ADC_UNIT_1,
         .adc_channel = (adc_channel_t)AC_MON_ADC_CHANNEL,
         .atten = ADC_ATTEN_DB_12,
-        .calibration_factor = AC_MON_CAL_FACTOR,
+        .calibration_factor = (settings->ac_mon.cal_k > 0.0f) ? settings->ac_mon.cal_k : AC_MON_CAL_FACTOR,
         .sample_rate_hz = 5000,
         .window_ms = WINDOW_MS,       /* 5 periods of 50 Hz */
         .filter_alpha_v = 0.15f,
@@ -192,11 +185,11 @@ esp_err_t ac_monitor_init(const ac_mon_settings_t *settings, ac_mon_change_cb_t 
     }
 
     ESP_LOGI(TAG, "AC mains monitor started (GPIO%d, ADC1_CH%d, adc_continuous 5 kHz x4, %d ms window, K=%.4f V/mV)",
-             AC_MON_ADC_GPIO, (int)AC_MON_ADC_CHANNEL, WINDOW_MS, (double)AC_MON_CAL_FACTOR);
+             AC_MON_ADC_GPIO, (int)AC_MON_ADC_CHANNEL, WINDOW_MS, (double)cfg.calibration_factor);
     return ESP_OK;
 }
 
-void ac_monitor_update_settings(const ac_mon_settings_t *settings)
+void ac_monitor_update_settings(const system_settings_t *settings)
 {
     if (!s_lock) return;
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -214,4 +207,47 @@ void ac_monitor_get_reading(ac_mon_reading_t *out)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     *out = s_reading;
     xSemaphoreGive(s_lock);
+}
+
+/* ------------------------------------------------------------------ */
+/* Voltmeter calibration (web UI)                                       */
+/* ------------------------------------------------------------------ */
+
+esp_err_t ac_monitor_calibrate(float vref_v, float *k_out)
+{
+    if (!s_dev) return ESP_ERR_INVALID_STATE;
+    float k = 0.0f;
+    esp_err_t err = zmpt101b_auto_calibrate(s_dev, vref_v, 1500, &k);
+    if (err != ESP_OK) return err;
+    if (!(k > 0.01f && k < 10.0f)) {
+        /* Nonsense ratio (wrong reference value or a broken sensor): don't keep it. */
+        ESP_LOGE(TAG, "calibration result %.4f V/mV is outside the sane range, reverting", (double)k);
+        zmpt101b_set_calibration_factor(s_dev, AC_MON_CAL_FACTOR);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    ESP_LOGI(TAG, "calibrated: reference %.2f V -> K = %.5f V/mV", (double)vref_v, (double)k);
+    if (k_out) *k_out = k;
+    return ESP_OK;
+}
+
+esp_err_t ac_monitor_reset_calibration(float *k_out)
+{
+    if (!s_dev) return ESP_ERR_INVALID_STATE;
+    esp_err_t err = zmpt101b_set_calibration_factor(s_dev, AC_MON_CAL_FACTOR);
+    if (err == ESP_OK && k_out) *k_out = AC_MON_CAL_FACTOR;
+    return err;
+}
+
+bool ac_monitor_get_level(void)
+{
+    if (!s_lock) return false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const bool v = s_reading.level;
+    xSemaphoreGive(s_lock);
+    return v;
+}
+
+float ac_monitor_get_cal_k(void)
+{
+    return s_dev ? zmpt101b_get_calibration_factor(s_dev) : AC_MON_CAL_FACTOR;
 }

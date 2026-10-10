@@ -46,6 +46,11 @@ esp_err_t plug_manager_test_action(uint32_t id, bool on, char *detail, size_t de
 esp_err_t plug_manager_get_settings(system_settings_t *out);
 esp_err_t plug_manager_update_settings(const system_settings_t *in);
 
+/* Persists the AC voltmeter calibration coefficient (settings.ac_mon.cal_k,
+ * 0 = Kconfig default) without touching any other setting. Called by
+ * POST /api/ac/calibrate after ac_monitor.c has already applied it. */
+esp_err_t plug_manager_set_ac_cal_k(float k);
+
 /* Bounded-wait probe of the internal lock -- for system_health.c's deadlock
  * detection ONLY, not a general-purpose accessor. Every other function
  * above intentionally blocks forever (portMAX_DELAY) because a plug

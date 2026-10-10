@@ -563,6 +563,26 @@ esp_err_t zmpt101b_auto_calibrate(zmpt101b_handle_t handle, float reference_v_rm
     return ESP_OK;
 }
 
+esp_err_t zmpt101b_set_calibration_factor(zmpt101b_handle_t handle, float k) {
+    if (!handle || !(k > 0.0f)) return ESP_ERR_INVALID_ARG;
+
+    xSemaphoreTake(handle->lock, portMAX_DELAY);
+    const float old = handle->cfg.calibration_factor;
+    handle->cfg.calibration_factor = k;
+    // Згладжена напруга лежить у старому масштабі: перемасштабуємо її, щоб показ не "стрибав" через EMA
+    if (old > 0.0f) handle->current_data.voltage_rms *= k / old;
+    xSemaphoreGive(handle->lock);
+    return ESP_OK;
+}
+
+float zmpt101b_get_calibration_factor(zmpt101b_handle_t handle) {
+    if (!handle) return 0.0f;
+    xSemaphoreTake(handle->lock, portMAX_DELAY);
+    const float k = handle->cfg.calibration_factor;
+    xSemaphoreGive(handle->lock);
+    return k;
+}
+
 esp_err_t zmpt101b_deinit(zmpt101b_handle_t handle) {
     if (!handle) return ESP_ERR_INVALID_ARG;
 

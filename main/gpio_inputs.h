@@ -7,13 +7,13 @@
 extern "C" {
 #endif
 
-/* Called (from the polling task) whenever a debounced, stable level change is
- * observed on an enabled input. level is the raw (non-inverted) GPIO level. */
+/* Called (from the polling task) whenever the level of an enabled input
+ * changes. level is the (non-inverted) level: 1 = input normal. */
 typedef void (*gpio_input_change_cb_t)(input_id_t id, bool level);
 
 esp_err_t gpio_inputs_init(const system_settings_t *settings, gpio_input_change_cb_t cb);
 
-/* Re-applies GPIO config / enabled set / debounce+poll timing after the
+/* Re-applies GPIO config / enabled set / poll timing after the
  * system settings were changed via the web UI. */
 esp_err_t gpio_inputs_update_settings(const system_settings_t *settings);
 

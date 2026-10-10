@@ -55,9 +55,8 @@ void storage_force_fixed_inputs(system_settings_t *settings)
     settings->inputs[2].label[sizeof(settings->inputs[2].label) - 1] = '\0';
     settings->inputs[2].gpio = CONFIG_INPUT_DC2_GPIO_DEFAULT;
 
-    /* Debounce/poll interval are physical-timing constants same as the GPIO
-     * pins above -- fixed by Kconfig, not web-editable (see Kconfig.projbuild). */
-    settings->debounce_ms = CONFIG_INPUT_DEBOUNCE_MS_DEFAULT;
+    /* Poll interval is a physical-timing constant same as the GPIO pins
+     * above -- fixed by Kconfig, not web-editable (see Kconfig.projbuild). */
     settings->poll_interval_ms = CONFIG_INPUT_POLL_INTERVAL_MS_DEFAULT;
 }
 
@@ -67,7 +66,7 @@ void storage_default_config(app_config_t *cfg)
 
     cfg->plug_count = 0;
 
-    storage_force_fixed_inputs(&cfg->settings); /* also sets debounce_ms/poll_interval_ms from Kconfig */
+    storage_force_fixed_inputs(&cfg->settings); /* also sets poll_interval_ms from Kconfig */
     cfg->settings.inputs[0].enabled = true;
     cfg->settings.inputs[1].enabled = false;
     cfg->settings.inputs[2].enabled = false;
@@ -78,14 +77,13 @@ void storage_default_config(app_config_t *cfg)
     /* Always active (no enable/disable setting -- see ac_mon_settings_t's
      * comment in app_types.h). Band is a generic +-10%/+-2% starting point
      * around 230V/50Hz; meant to be tuned per-installation from the web
-     * UI, not treated as a real spec. Before ZMPT101B is wired up (or if
-     * it's unplugged), every reading is simply "no mains" (mains_present
-     * false), which already reports as in_band=true -- nothing to protect
-     * against -- so there's no bad-default risk in leaving this always on. */
+     * UI, not treated as a real spec. No mains (or an unplugged ZMPT101B)
+     * reads as 0 V, i.e. out of band: an AC1-bound plug stays off then. */
     cfg->settings.ac_mon.v_min = 198;
     cfg->settings.ac_mon.v_max = 253;
     cfg->settings.ac_mon.f_min = 49.5f;
     cfg->settings.ac_mon.f_max = 50.5f;
+    cfg->settings.ac_mon.cal_k = 0.0f; /* 0 = Kconfig default, see ac_mon_settings_t */
 }
 
 /* ---- JSON <-> struct ---- */
@@ -98,7 +96,7 @@ static void plug_to_json(const plug_t *p, cJSON *arr)
     cJSON_AddBoolToObject(o, "enabled", p->enabled);
     cJSON_AddNumberToObject(o, "input", (int)p->input);
     cJSON_AddBoolToObject(o, "invert", p->invert);
-    cJSON_AddNumberToObject(o, "on_delay_ms", p->on_delay_ms);
+    cJSON_AddNumberToObject(o, "on_delay_s", p->on_delay_s);
     cJSON_AddNumberToObject(o, "driver", (int)p->driver);
 
     cJSON *http = cJSON_CreateObject();
@@ -165,7 +163,10 @@ static void plug_from_json(const cJSON *o, plug_t *p)
     p->enabled = json_get_bool(o, "enabled", true);
     p->input = (input_id_t)json_get_int(o, "input", INPUT_NONE);
     p->invert = json_get_bool(o, "invert", false);
-    p->on_delay_ms = (uint32_t)json_get_int(o, "on_delay_ms", 0);
+    int od = json_get_int(o, "on_delay_s", 0);
+    if (od < 0) od = 0;
+    if (od > PLUG_ON_DELAY_S_MAX) od = PLUG_ON_DELAY_S_MAX;
+    p->on_delay_s = (uint32_t)od;
     p->driver = (driver_type_t)json_get_int(o, "driver", DRIVER_HTTP);
 
     const cJSON *http = cJSON_GetObjectItemCaseSensitive(o, "http");
@@ -211,7 +212,6 @@ static cJSON *settings_to_json(const system_settings_t *s)
     }
     cJSON_AddItemToObject(root, "inputs", inputs);
 
-    cJSON_AddNumberToObject(root, "debounce_ms", s->debounce_ms);
     cJSON_AddNumberToObject(root, "poll_interval_ms", s->poll_interval_ms);
     cJSON_AddStringToObject(root, "mqtt_uri", s->mqtt_uri);
     cJSON_AddStringToObject(root, "mqtt_user", s->mqtt_user);
@@ -223,6 +223,7 @@ static cJSON *settings_to_json(const system_settings_t *s)
     cJSON_AddNumberToObject(ac_mon, "v_max", s->ac_mon.v_max);
     cJSON_AddNumberToObject(ac_mon, "f_min", (double)s->ac_mon.f_min);
     cJSON_AddNumberToObject(ac_mon, "f_max", (double)s->ac_mon.f_max);
+    cJSON_AddNumberToObject(ac_mon, "cal_k", (double)s->ac_mon.cal_k);
     cJSON_AddItemToObject(root, "ac_mon", ac_mon);
 
     return root;
@@ -248,7 +249,7 @@ static void settings_from_json(const cJSON *root, system_settings_t *s, const sy
         }
     }
 
-    /* debounce_ms/poll_interval_ms are intentionally NOT read from JSON --
+    /* poll_interval_ms is intentionally NOT read from JSON --
      * fixed by Kconfig (see storage_force_fixed_inputs()), same as gpio
      * above; still written out by settings_to_json() below purely so
      * GET /api/settings can display the effective values. */
@@ -263,6 +264,8 @@ static void settings_from_json(const cJSON *root, system_settings_t *s, const sy
         s->ac_mon.v_max = json_get_int(ac_mon, "v_max", s->ac_mon.v_max);
         s->ac_mon.f_min = json_get_float(ac_mon, "f_min", s->ac_mon.f_min);
         s->ac_mon.f_max = json_get_float(ac_mon, "f_max", s->ac_mon.f_max);
+        float k = json_get_float(ac_mon, "cal_k", s->ac_mon.cal_k);
+        s->ac_mon.cal_k = (k > 0.01f && k < 10.0f) ? k : 0.0f; /* sanity: anything else = Kconfig default */
     }
 }
 
@@ -326,7 +329,7 @@ esp_err_t storage_load_config(app_config_t *cfg)
     } else {
         cfg->settings = defaults.settings;
     }
-    /* Belt-and-braces: guarantee GPIOs/debounce/poll interval match Kconfig
+    /* Belt-and-braces: guarantee GPIOs/poll interval match Kconfig
      * even if config.json was written by an older firmware that persisted
      * a different value. */
     storage_force_fixed_inputs(&cfg->settings);

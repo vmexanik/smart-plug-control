@@ -22,24 +22,13 @@ menu "Smart Plug Control"
             default 2
             range 0 48
 
-        config INPUT_DEBOUNCE_MS_DEFAULT
-            int "Input debounce (ms)"
-            default 50
-            range 0 5000
-            help
-                Not editable from the web UI (same reasoning as the GPIO
-                pins above -- these are physical-wiring/timing constants,
-                not something to get wrong from a phone browser). Change
-                here and reflash if your switches/relays need a different
-                debounce window.
-
         config INPUT_POLL_INTERVAL_MS_DEFAULT
             int "Input poll interval (ms)"
             default 100
             range 10 5000
             help
                 How often gpio_inputs.c re-reads the trigger input levels.
-                Not editable from the web UI, same as debounce above.
+                Not editable from the web UI (physical timing constant).
     endmenu
 
     config WEB_HTTP_PORT
@@ -101,37 +90,18 @@ menu "Smart Plug Control"
 
         config AC_MON_VOLTS_PER_RMS_MV_X10000
             int "Calibration: volts of mains per millivolt RMS, x10000"
-            default 6010
+            default 7667
             range 1 1000000
             help
+                Factory default for the AC voltage coefficient: volts of
+                mains per millivolt RMS at the ADC pin (after adc_cali).
                 Kconfig has no float type, so this is the real coefficient
-                multiplied by 10000 (5750 here = 0.5750). ac_monitor.c
-                divides it back down at compile time.
+                multiplied by 10000 (7667 = 0.7667). 7667 corresponds to
+                0.3 V RMS at the ADC pin for 230 V mains (230 / 300 mV).
 
-                NOTE: this option was renamed from
-                AC_MON_VOLTS_PER_ADC_RMS_COUNT_X10000. If you calibrated
-                before ac_monitor.c switched to adc_cali (raw-count-to-
-                millivolt conversion via this chip's own eFuse calibration
-                data), that old value is for a different unit (volts per
-                raw ADC count, not volts per millivolt RMS) and must NOT be
-                reused here -- recalibrate from scratch. The rename is
-                deliberate, so an old sdkconfig entry under the previous
-                name is simply ignored instead of silently feeding a
-                wrong-unit number into the new formula.
-
-                The ZMPT101B module's own trim pot sets its gain, so this
-                number is different for every physical board -- there is
-                no single correct default; 0.575 (230V at an assumed 400mV
-                RMS module output) is only a starting guess.
-
-                To calibrate: set AC_CAL_ENABLE to 1 near the top of
-                ac_monitor.c, set AC_CAL_VRMS there to the real mains
-                voltage read off a multimeter, reflash, and read the
-                computed coefficient from the boot log ("CAL: volts_per_
-                rms_mv = ..."). Take a few readings across a session, not
-                just one (see ac_monitor.c's sampling-backend-history
-                comment), multiply the value you settle on by 10000, put it
-                here, set AC_CAL_ENABLE back to 0.
+                The real value is set from the web UI (voltmeter
+                calibration) and stored in settings; this is only used
+                until that is done or after a calibration reset.
     endmenu
 
     menu "Status LED"

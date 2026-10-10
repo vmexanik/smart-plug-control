@@ -9,15 +9,20 @@
 
 static const char *TAG = "gpio_inputs";
 
+/* DC1/DC2 are hardwired inverted (active-low): a LOW pin means "input
+ * normal" (level 1), a HIGH pin means out of range. Fixed in firmware, not
+ * exposed in the web UI. The per-plug "invert" option is separate and is
+ * applied later in plug_manager. */
+#define DC_INPUTS_INVERTED 1
+
 static system_settings_t s_settings;
 static SemaphoreHandle_t s_lock;
 static gpio_input_change_cb_t s_cb;
 static TaskHandle_t s_task_handle;
 
-static bool s_stable_level[INPUT_COUNT_PHYSICAL];
-static bool s_last_raw[INPUT_COUNT_PHYSICAL];
-static uint32_t s_debounce_counter[INPUT_COUNT_PHYSICAL];
-static bool s_have_sample[INPUT_COUNT_PHYSICAL];
+/* Last reported level per input (1 = normal). Starts at 0, so an input that
+ * is normal at boot is reported once on the first poll. */
+static bool s_level[INPUT_COUNT_PHYSICAL];
 
 static inline int idx_of(input_id_t id) { return (int)id - 1; }
 
@@ -39,12 +44,12 @@ static void configure_gpio_input(int gpio_num)
 
 static void apply_gpio_config_locked(void)
 {
+    /* Only (re)configures the pins.
+     * An input that gets disabled has its level cleared by poll_task. */
     for (int i = 0; i < INPUT_COUNT_PHYSICAL; i++) {
         if (s_settings.inputs[i].enabled) {
             configure_gpio_input(s_settings.inputs[i].gpio);
         }
-        s_have_sample[i] = false;
-        s_debounce_counter[i] = 0;
     }
 }
 
@@ -55,51 +60,39 @@ static void poll_task(void *arg)
         system_settings_t snap = s_settings;
         xSemaphoreGive(s_lock);
 
-        uint32_t threshold = snap.debounce_ms / (snap.poll_interval_ms ? snap.poll_interval_ms : 1);
-        if (threshold < 1) threshold = 1;
+        const uint32_t poll_ms = snap.poll_interval_ms ? snap.poll_interval_ms : 100;
 
         for (int i = 0; i < INPUT_COUNT_PHYSICAL; i++) {
-            if (!snap.inputs[i].enabled || snap.inputs[i].gpio < 0) continue;
-
-            bool raw = gpio_get_level(snap.inputs[i].gpio) != 0;
-
-            xSemaphoreTake(s_lock, portMAX_DELAY);
-            if (!s_have_sample[i]) {
-                s_have_sample[i] = true;
-                s_last_raw[i] = raw;
-                s_stable_level[i] = raw;
-                s_debounce_counter[i] = 0;
+            if (!snap.inputs[i].enabled || snap.inputs[i].gpio < 0) {
+                /* Disabled (or virtual) input: forget its level so that
+                 * re-enabling it starts from "not normal" again. */
+                xSemaphoreTake(s_lock, portMAX_DELAY);
+                s_level[i] = false;
                 xSemaphoreGive(s_lock);
                 continue;
             }
 
-            if (raw == s_last_raw[i]) {
-                if (s_debounce_counter[i] < threshold) {
-                    s_debounce_counter[i]++;
-                }
-            } else {
-                s_last_raw[i] = raw;
-                s_debounce_counter[i] = 0;
-            }
+            bool level = gpio_get_level(snap.inputs[i].gpio) != 0;
+#if DC_INPUTS_INVERTED
+            level = !level;
+#endif
+            const input_id_t id = snap.inputs[i].id;
 
-            bool changed = false;
-            input_id_t id = snap.inputs[i].id;
-            if (s_debounce_counter[i] >= threshold && s_stable_level[i] != raw) {
-                s_stable_level[i] = raw;
-                changed = true;
-            }
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            const bool changed = (s_level[i] != level);
+            s_level[i] = level;
             xSemaphoreGive(s_lock);
 
             if (changed) {
                 ESP_LOGI(TAG, "Input %s (gpio %d) -> %d", snap.inputs[i].label,
-                         snap.inputs[i].gpio, raw ? 1 : 0);
+                         snap.inputs[i].gpio, level ? 1 : 0);
                 if (s_cb) {
-                    s_cb(id, raw);
+                    s_cb(id, level);
                 }
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(snap.poll_interval_ms ? snap.poll_interval_ms : 100));
+        vTaskDelay(pdMS_TO_TICKS(poll_ms));
     }
 }
 
@@ -110,6 +103,7 @@ esp_err_t gpio_inputs_init(const system_settings_t *settings, gpio_input_change_
 
     s_settings = *settings;
     s_cb = cb;
+    memset(s_level, 0, sizeof(s_level));
 
     apply_gpio_config_locked();
 
@@ -135,7 +129,7 @@ bool gpio_inputs_get_level(input_id_t id)
     if (i < 0 || i >= INPUT_COUNT_PHYSICAL) return false;
     bool v;
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    v = s_stable_level[i];
+    v = s_level[i];
     xSemaphoreGive(s_lock);
     return v;
 }

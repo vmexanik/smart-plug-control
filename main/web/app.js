@@ -45,7 +45,7 @@
       $$('.tab-content').forEach((c) => c.classList.remove('active'));
       btn.classList.add('active');
       $('#tab-' + btn.dataset.tab).classList.add('active');
-      if (btn.dataset.tab === 'settings') { loadSettings(); loadWifiStatus(); loadTime(); }
+      if (btn.dataset.tab === 'settings') { loadSettings(); loadWifiStatus(); loadTime(); loadFwInfo(); }
       if (btn.dataset.tab === 'log') loadLog();
     });
   });
@@ -139,9 +139,7 @@
         } else if (!m.mains_present) {
           acEl.innerHTML = `<span class="hint">сигнал не виявлено (ZMPT101B не підключено або немає мережі)</span>`;
         } else {
-          const bandTxt = m.in_band
-            ? `<span class="good">в межах</span>`
-            : `<span class="bad">поза межами!</span>`;
+          const bandTxt = '';
           acEl.innerHTML = `U = ${m.vrms.toFixed(1)} В, f = ${m.freq_hz.toFixed(2)} Гц — ${bandTxt}`;
         }
       }
@@ -496,7 +494,7 @@
       $('#pf-enabled').checked = plug.enabled;
       $('#pf-input').value = plug.input;
       $('#pf-invert').checked = plug.invert;
-      $('#pf-on-delay').value = String(plug.on_delay_ms || 0);
+      $('#pf-on-delay').value = String(plug.on_delay_s || 0);
       /* Composite dropdown value where possible ("http:shelly_gen2"); falls
        * back to the plain driver for MQTT/Zigbee or for a "known but not
        * templated" HTTP family (e.g. esphome) that has no matching option --
@@ -561,7 +559,7 @@
       enabled: $('#pf-enabled').checked,
       input: $('#pf-input').value,
       invert: $('#pf-invert').checked,
-      on_delay_ms: parseInt($('#pf-on-delay').value, 10) || 0,
+      on_delay_s: parseInt($('#pf-on-delay').value, 10) || 0,
       driver: driver,
       http: {
         on_url: $('#pf-http-on').value.trim(),
@@ -879,11 +877,13 @@
         /* <label> wrapping both the checkbox and its text -- clicking
          * anywhere on the row toggles it, same convention as the plug
          * form's "Увімкнена" row (#pf-enabled-row). */
-        const row = document.createElement('label');
+        const row = document.createElement('div');
         row.className = 'input-row';
         row.innerHTML = `
-          <input type="checkbox" data-idx="${idx}" class="inp-enabled" ${inp.enabled ? 'checked' : ''}>
-          <span>${escapeHtml(inp.label)}</span>`;
+          <label class="input-enable">
+            <input type="checkbox" data-idx="${idx}" class="inp-enabled" ${inp.enabled ? 'checked' : ''}>
+            <span>${escapeHtml(inp.label)}</span>
+          </label>`;
         list.appendChild(row);
       });
       $('#set-mqtt-uri').value = s.mqtt_uri;
@@ -895,6 +895,7 @@
         $('#set-acmon-vmax').value = s.ac_mon.v_max;
         $('#set-acmon-fmin').value = s.ac_mon.f_min;
         $('#set-acmon-fmax').value = s.ac_mon.f_max;
+        renderCalInfo(s.ac_mon.cal_k);
       }
     } catch (e) {
       $('#settings-save-result').textContent = 'Помилка завантаження: ' + e.message;
@@ -902,15 +903,21 @@
     }
   }
 
+  function renderCalInfo(k) {
+    $('#ac-cal-info').textContent = (typeof k === 'number')
+      ? `Поточний коефіцієнт: ${k.toFixed(4)} В на мВ` : '';
+  }
+
   $('#btn-save-settings').addEventListener('click', async () => {
     const inputs = [];
-    $$('.inp-enabled').forEach((cb) => {
-      inputs.push({ enabled: cb.checked }); /* gpio is fixed in firmware, not sent */
+    $$('.input-row').forEach((row) => {
+      /* gpio is fixed in firmware, not sent */
+      inputs.push({ enabled: row.querySelector('.inp-enabled').checked });
     });
     const body = {
       inputs,
-      /* debounce_ms/poll_interval_ms are fixed by Kconfig (see settings_from_json
-       * in web_server.c) -- not sent, the server ignores them from this endpoint anyway. */
+      /* poll_interval_ms is fixed by Kconfig (see settings_from_json
+       * in web_server.c) -- not sent, the server ignores it from this endpoint anyway. */
       mqtt_uri: $('#set-mqtt-uri').value.trim(),
       mqtt_client_id: $('#set-mqtt-client-id').value.trim(),
       mqtt_user: $('#set-mqtt-user').value,
@@ -931,6 +938,127 @@
     } catch (e) {
       result.textContent = 'Помилка: ' + e.message;
       result.className = 'save-result error';
+    }
+  });
+
+  /* ---------------- AC voltmeter calibration ---------------- */
+  async function acCalibrate(payload, btn) {
+    const res = $('#ac-cal-result');
+    $$('#btn-ac-calibrate, #btn-ac-cal-reset').forEach((b) => { b.disabled = true; });
+    res.textContent = 'Калібрування…';
+    res.className = 'save-result';
+    try {
+      const r = await api('/api/ac/calibrate', { method: 'POST', body: JSON.stringify(payload) });
+      renderCalInfo(r.cal_k);
+      res.textContent = payload.reset
+        ? 'Скинуто до заводського коефіцієнта'
+        : `Готово, покази: ${r.vrms.toFixed(1)} В`;
+      if (!payload.reset) $('#acmon-cal-ref').value = '';
+    } catch (e) {
+      res.textContent = 'Помилка: ' + e.message;
+      res.className = 'save-result error';
+    } finally {
+      $$('#btn-ac-calibrate, #btn-ac-cal-reset').forEach((b) => { b.disabled = false; });
+    }
+  }
+
+  $('#btn-ac-calibrate').addEventListener('click', () => {
+    const vref = parseFloat($('#acmon-cal-ref').value);
+    if (!(vref >= 50 && vref <= 400)) {
+      const res = $('#ac-cal-result');
+      res.textContent = 'Введіть напругу за мультиметром (50–400 В)';
+      res.className = 'save-result error';
+      return;
+    }
+    acCalibrate({ vref });
+  });
+  $('#btn-ac-cal-reset').addEventListener('click', () => acCalibrate({ reset: true }));
+
+  /* ---------------- firmware update (OTA) ---------------- */
+  let fwMaxSize = 0;
+
+  async function loadFwInfo() {
+    try {
+      const i = await api('/api/system/ota');
+      fwMaxSize = i.max_size || 0;
+      $('#fw-info').textContent = `Поточна прошивка: ${i.project || '?'} ${i.version || ''}, зібрана ${i.built || '?'}`;
+    } catch (e) {
+      $('#fw-info').textContent = 'Не вдалося отримати інформацію про прошивку: ' + e.message;
+    }
+  }
+
+  function uploadFirmware(file, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/system/ota');
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded, e.total); };
+      xhr.onload = () => {
+        let d = null;
+        try { d = JSON.parse(xhr.responseText); } catch (e) { /* empty body */ }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(d);
+        else reject(new Error((d && d.error) ? d.error : ('HTTP ' + xhr.status)));
+      };
+      xhr.onerror = () => reject(new Error("з'єднання перервано"));
+      xhr.ontimeout = () => reject(new Error('таймаут'));
+      xhr.send(file);
+    });
+  }
+
+  /* After a successful upload the device reboots: wait until /api/status
+   * answers again, then reload the page so the new UI files are used. */
+  function waitForReboot() {
+    const res = $('#fw-result');
+    let tries = 0;
+    const tick = async () => {
+      tries++;
+      try {
+        await api('/api/status');
+        if (tries > 2) { location.reload(); return; }
+      } catch (e) { /* still rebooting */ }
+      if (tries > 60) {
+        res.textContent = 'Пристрій довго не відповідає — перевірте його вручну';
+        res.className = 'save-result error';
+        return;
+      }
+      setTimeout(tick, 2000);
+    };
+    setTimeout(tick, 4000);
+  }
+
+  $('#btn-fw-upload').addEventListener('click', async () => {
+    const res = $('#fw-result');
+    const bar = $('#fw-progress');
+    const file = $('#fw-file').files[0];
+    res.className = 'save-result error';
+    if (!file) { res.textContent = 'Оберіть файл .bin'; return; }
+    if (fwMaxSize && file.size > fwMaxSize) {
+      res.textContent = `Файл завеликий: ${(file.size / 1024).toFixed(0)} КБ, максимум ${(fwMaxSize / 1024).toFixed(0)} КБ`;
+      return;
+    }
+    if (!confirm(`Прошити пристрій файлом ${file.name} (${(file.size / 1024).toFixed(0)} КБ)? Пристрій перезавантажиться.`)) return;
+
+    const btn = $('#btn-fw-upload');
+    btn.disabled = true;
+    $('#fw-file').disabled = true;
+    bar.classList.remove('hidden');
+    bar.value = 0;
+    res.className = 'save-result';
+    res.textContent = 'Завантаження… не вимикайте пристрій';
+    try {
+      await uploadFirmware(file, (loaded, total) => {
+        bar.value = Math.round(loaded * 100 / total);
+        res.textContent = `Завантаження… ${bar.value}%`;
+      });
+      bar.value = 100;
+      res.textContent = 'Прошивку записано. Пристрій перезавантажується…';
+      waitForReboot();
+    } catch (e) {
+      res.textContent = 'Помилка: ' + e.message;
+      res.className = 'save-result error';
+      bar.classList.add('hidden');
+      btn.disabled = false;
+      $('#fw-file').disabled = false;
     }
   });
 

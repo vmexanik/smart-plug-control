@@ -149,7 +149,7 @@ void app_main(void)
      * hardcoded here; this board's default is GPIO11/ADC2_CH0) -- not
      * treated as fatal if it fails to start: this is an optional sensor,
      * most of the firmware works fine without it. */
-    if (ac_monitor_init(&cfg.settings.ac_mon, plug_manager_on_ac_mon_change) != ESP_OK) {
+    if (ac_monitor_init(&cfg.settings, plug_manager_on_ac_mon_change) != ESP_OK) {
         ESP_LOGW(TAG, "could not start AC mains monitor");
     }
     BOOT_WDT_STEP();

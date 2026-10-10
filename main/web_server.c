@@ -21,6 +21,7 @@
 #include "net_scan.h"
 #include "fingerprint.h"
 #include "ac_monitor.h"
+#include "esp_ota_ops.h"
 
 static const char *TAG = "web_server";
 
@@ -50,6 +51,7 @@ static void set_status(httpd_req_t *req, int code)
         case 400: httpd_resp_set_status(req, "400 Bad Request"); break;
         case 404: httpd_resp_set_status(req, "404 Not Found"); break;
         case 409: httpd_resp_set_status(req, "409 Conflict"); break;
+        case 413: httpd_resp_set_status(req, "413 Payload Too Large"); break;
         default:  httpd_resp_set_status(req, "500 Internal Server Error"); break;
     }
 }
@@ -190,7 +192,7 @@ static cJSON *plug_to_json(const plug_t *p)
     cJSON_AddBoolToObject(o, "enabled", p->enabled);
     cJSON_AddStringToObject(o, "input", input_label(p->input));
     cJSON_AddBoolToObject(o, "invert", p->invert);
-    cJSON_AddNumberToObject(o, "on_delay_ms", p->on_delay_ms);
+    cJSON_AddNumberToObject(o, "on_delay_s", p->on_delay_s);
     cJSON_AddStringToObject(o, "driver", driver_label(p->driver));
 
     cJSON *http = cJSON_CreateObject();
@@ -250,10 +252,10 @@ static void plug_from_json(const cJSON *o, plug_t *p)
      * upper bound for a relay anti-chatter delay, well past anything a real
      * installation would need, just enough to stop a typo/garbage value
      * from making a plug appear to "never turn on". */
-    int on_delay = jget_int(o, "on_delay_ms", 0);
+    int on_delay = jget_int(o, "on_delay_s", 0);
     if (on_delay < 0) on_delay = 0;
-    if (on_delay > 60000) on_delay = 60000;
-    p->on_delay_ms = (uint32_t)on_delay;
+    if (on_delay > PLUG_ON_DELAY_S_MAX) on_delay = PLUG_ON_DELAY_S_MAX;
+    p->on_delay_s = (uint32_t)on_delay;
 
     char driver_str[8];
     jget_str(o, "driver", driver_str, sizeof(driver_str));
@@ -504,7 +506,6 @@ static cJSON *settings_to_json(const system_settings_t *s)
         cJSON_AddItemToArray(inputs, o);
     }
     cJSON_AddItemToObject(root, "inputs", inputs);
-    cJSON_AddNumberToObject(root, "debounce_ms", s->debounce_ms);
     cJSON_AddNumberToObject(root, "poll_interval_ms", s->poll_interval_ms);
     cJSON_AddStringToObject(root, "mqtt_uri", s->mqtt_uri);
     cJSON_AddStringToObject(root, "mqtt_user", s->mqtt_user);
@@ -516,6 +517,9 @@ static cJSON *settings_to_json(const system_settings_t *s)
     cJSON_AddNumberToObject(ac_mon, "v_max", s->ac_mon.v_max);
     cJSON_AddNumberToObject(ac_mon, "f_min", (double)s->ac_mon.f_min);
     cJSON_AddNumberToObject(ac_mon, "f_max", (double)s->ac_mon.f_max);
+    /* Coefficient actually in use (read-only here -- changed only through
+     * POST /api/ac/calibrate, see settings_from_json()). */
+    cJSON_AddNumberToObject(ac_mon, "cal_k", (double)ac_monitor_get_cal_k());
     cJSON_AddItemToObject(root, "ac_mon", ac_mon);
 
     return root;
@@ -538,9 +542,9 @@ static void settings_from_json(const cJSON *root, system_settings_t *s)
             i++;
         }
     }
-    /* debounce_ms/poll_interval_ms are intentionally ignored here too --
-     * fixed by Kconfig, same reasoning as gpio above (still returned by
-     * settings_to_json() so the UI can display the effective values). */
+    /* poll_interval_ms is intentionally ignored here too -- fixed by
+     * Kconfig, same reasoning as gpio above. ac_mon.cal_k is also ignored
+     * here on purpose: only POST /api/ac/calibrate may change it. */
     jget_str(root, "mqtt_uri", s->mqtt_uri, sizeof(s->mqtt_uri));
     jget_str(root, "mqtt_user", s->mqtt_user, sizeof(s->mqtt_user));
     jget_str(root, "mqtt_pass", s->mqtt_pass, sizeof(s->mqtt_pass));
@@ -573,7 +577,7 @@ static void settings_from_json(const cJSON *root, system_settings_t *s)
         if (s->ac_mon.f_min > s->ac_mon.f_max) s->ac_mon.f_min = s->ac_mon.f_max;
     }
 
-    /* Belt-and-braces: gpio/debounce/poll_interval can never be changed via
+    /* Belt-and-braces: gpio/poll_interval can never be changed via
      * this endpoint. */
     storage_force_fixed_inputs(s);
 }
@@ -602,6 +606,237 @@ static esp_err_t h_settings_post(httpd_req_t *req)
     if (err != ESP_OK) return send_error(req, 500, "failed to save settings");
 
     return send_json(req, settings_to_json(&s), 200);
+}
+
+/* ---------------------------------------------------------------------- */
+/* /api/ac/calibrate                                                       */
+/* ---------------------------------------------------------------------- */
+
+/* POST {"vref": 230.4}  -- vref is the multimeter reading; the voltmeter
+ * coefficient is recomputed so the displayed voltage equals it (averaged
+ * over ~1.5 s of windows, so this request takes that long), applied
+ * immediately and persisted.
+ * POST {"reset": true}  -- back to the Kconfig default coefficient. */
+static esp_err_t h_ac_calibrate(httpd_req_t *req)
+{
+    char body[128];
+    if (recv_body(req, body, sizeof(body)) != ESP_OK) {
+        return send_error(req, 400, "body too large or missing");
+    }
+    cJSON *root = cJSON_Parse(body);
+    if (!root) return send_error(req, 400, "invalid json");
+    const cJSON *rst = cJSON_GetObjectItemCaseSensitive(root, "reset");
+    const bool reset = cJSON_IsTrue(rst);
+    const float vref = jget_float(root, "vref", 0.0f);
+    cJSON_Delete(root);
+
+    float k = 0.0f;
+    char detail[64];
+    if (reset) {
+        if (ac_monitor_reset_calibration(&k) != ESP_OK) {
+            return send_error(req, 500, "AC-монітор не запущено");
+        }
+        plug_manager_set_ac_cal_k(0.0f);
+        snprintf(detail, sizeof(detail), "reset to default K=%.4f", (double)k);
+    } else {
+        if (!(vref >= 50.0f && vref <= 400.0f)) {
+            return send_error(req, 400, "значення мультиметра має бути в межах 50..400 В");
+        }
+        esp_err_t err = ac_monitor_calibrate(vref, &k);
+        if (err == ESP_FAIL) {
+            return send_error(req, 409, "немає сигналу від ZMPT101B — перевірте підключення і наявність мережі");
+        }
+        if (err != ESP_OK) {
+            return send_error(req, 500, "калібрування не вдалося");
+        }
+        plug_manager_set_ac_cal_k(k);
+        snprintf(detail, sizeof(detail), "ref %.2f V, K=%.4f", (double)vref, (double)k);
+    }
+    event_log_append(LOG_SRC_SYSTEM, "-", "ac_calibration", true, detail);
+
+    ac_mon_reading_t r;
+    ac_monitor_get_reading(&r);
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    cJSON_AddNumberToObject(resp, "cal_k", (double)k);
+    cJSON_AddNumberToObject(resp, "vrms", (double)r.vrms);
+    return send_json(req, resp, 200);
+}
+
+/* ---------------------------------------------------------------------- */
+/* /api/system/ota -- firmware update from the web UI                      */
+/* ---------------------------------------------------------------------- */
+
+/* GET  -> running firmware info + max accepted image size.
+ * POST -> body is the raw application image (build/<project>.bin, NOT the
+ *         bootloader/partition table/merged binary), streamed straight into the
+ *         next OTA slot with esp_ota_write(). Rejects anything that isn't an
+ *         app image of this project, checks the image (SHA256/checksum) in
+ *         esp_ota_end(), switches the boot partition and reboots. With
+ *         CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE the new image is marked valid
+ *         by app_main.c once boot completes; a crash before that rolls back
+ *         to the previous slot. This handler occupies the (single) httpd task
+ *         for the duration of the upload, other web requests wait. */
+#define OTA_CHUNK 4096
+static volatile bool s_ota_busy = false;
+
+static esp_err_t h_ota_info(httpd_req_t *req)
+{
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
+    cJSON *o = cJSON_CreateObject();
+    esp_app_desc_t d;
+    if (run && esp_ota_get_partition_description(run, &d) == ESP_OK) {
+        char tmp[48];
+        snprintf(tmp, sizeof(tmp), "%.31s", d.project_name);
+        cJSON_AddStringToObject(o, "project", tmp);
+        snprintf(tmp, sizeof(tmp), "%.31s", d.version);
+        cJSON_AddStringToObject(o, "version", tmp);
+        snprintf(tmp, sizeof(tmp), "%.15s %.15s", d.date, d.time);
+        cJSON_AddStringToObject(o, "built", tmp);
+    }
+    if (run) cJSON_AddStringToObject(o, "partition", run->label);
+    cJSON_AddNumberToObject(o, "max_size", next ? (double)next->size : 0.0);
+    return send_json(req, o, 200);
+}
+
+/* Reads up to `want` bytes. fill=true loops until all `want` bytes arrived,
+ * fill=false returns after the first successful read. Returns bytes read,
+ * -1 on error / connection loss / >10 consecutive receive timeouts. */
+static int ota_recv(httpd_req_t *req, uint8_t *buf, size_t want, bool fill)
+{
+    size_t n = 0;
+    int timeouts = 0;
+    while (n < want) {
+        int r = httpd_req_recv(req, (char *)buf + n, want - n);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (++timeouts > 10) return -1;
+            continue;
+        }
+        if (r <= 0) return -1;
+        timeouts = 0;
+        n += (size_t)r;
+        if (!fill) break;
+    }
+    return (int)n;
+}
+
+static esp_err_t h_ota_post(httpd_req_t *req)
+{
+    if (s_ota_busy) return send_error(req, 409, "оновлення вже виконується");
+
+    const size_t total = req->content_len;
+    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
+    if (!part) return send_error(req, 500, "OTA-розділ не знайдено");
+    if (total < 1024) return send_error(req, 400, "файл порожній або занадто малий");
+    if (total > part->size) return send_error(req, 413, "файл більший за розділ прошивки");
+
+    uint8_t *buf = malloc(OTA_CHUNK);
+    if (!buf) return send_error(req, 500, "недостатньо пам'яті");
+
+    s_ota_busy = true;
+    esp_ota_handle_t handle = 0;
+    bool begun = false;
+    int code = 400;
+    char msg[256] = "";   /* Ukrainian text is 2 bytes/char -- keep well above the longest message */
+    size_t got = 0;
+
+    /* First chunk is read in full: it carries the image header and the app descriptor. */
+    size_t first = total < OTA_CHUNK ? total : OTA_CHUNK;
+    int r = ota_recv(req, buf, first, true);
+    if (r < 0) { snprintf(msg, sizeof(msg), "передачу файлу перервано"); goto fail; }
+
+    /* Fixed ESP image layout: 24-byte image header + 8-byte first segment header,
+     * then esp_app_desc_t. Hard-coded because esp_image_format.h is not a public
+     * header in every IDF version. */
+    const size_t desc_off = 24 + 8;
+    esp_app_desc_t nd;
+    if ((size_t)r < desc_off + sizeof(nd) || buf[0] != 0xE9 /* image magic */) {
+        snprintf(msg, sizeof(msg), "це не файл прошивки застосунку (потрібен build/*.bin застосунку)");
+        goto fail;
+    }
+    memcpy(&nd, buf + desc_off, sizeof(nd));
+    if (nd.magic_word != ESP_APP_DESC_MAGIC_WORD) {
+        snprintf(msg, sizeof(msg), "це не файл прошивки застосунку (потрібен build/*.bin застосунку)");
+        goto fail;
+    }
+    esp_app_desc_t rd;
+    if (esp_ota_get_partition_description(esp_ota_get_running_partition(), &rd) == ESP_OK &&
+        strncmp(nd.project_name, rd.project_name, sizeof(nd.project_name)) != 0) {
+        snprintf(msg, sizeof(msg), "прошивка іншого проєкту: %.31s", nd.project_name);
+        goto fail;
+    }
+
+    esp_err_t err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &handle);
+    if (err != ESP_OK) {
+        code = 500;
+        snprintf(msg, sizeof(msg), "esp_ota_begin: %s", esp_err_to_name(err));
+        goto fail;
+    }
+    begun = true;
+    ESP_LOGI(TAG, "OTA: %u bytes -> %s (project %.31s, version %.31s)",
+             (unsigned)total, part->label, nd.project_name, nd.version);
+
+    err = esp_ota_write(handle, buf, (size_t)r);
+    if (err != ESP_OK) {
+        code = 500;
+        snprintf(msg, sizeof(msg), "помилка запису у flash: %s", esp_err_to_name(err));
+        goto fail;
+    }
+    got = (size_t)r;
+
+    while (got < total) {
+        size_t want = total - got;
+        if (want > OTA_CHUNK) want = OTA_CHUNK;
+        r = ota_recv(req, buf, want, false);
+        if (r < 0) { snprintf(msg, sizeof(msg), "передачу файлу перервано (отримано %u з %u байт)", (unsigned)got, (unsigned)total); goto fail; }
+        err = esp_ota_write(handle, buf, (size_t)r);
+        if (err != ESP_OK) {
+            code = 500;
+            snprintf(msg, sizeof(msg), "помилка запису у flash: %s", esp_err_to_name(err));
+            goto fail;
+        }
+        got += (size_t)r;
+    }
+
+    begun = false; /* esp_ota_end() consumes the handle either way */
+    err = esp_ota_end(handle);
+    if (err != ESP_OK) {
+        if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
+            snprintf(msg, sizeof(msg), "образ не пройшов перевірку (файл пошкоджено або це прошивка для іншого чіпа)");
+        } else {
+            code = 500;
+            snprintf(msg, sizeof(msg), "esp_ota_end: %s", esp_err_to_name(err));
+        }
+        goto fail;
+    }
+    err = esp_ota_set_boot_partition(part);
+    if (err != ESP_OK) {
+        code = 500;
+        snprintf(msg, sizeof(msg), "не вдалося вибрати новий розділ: %s", esp_err_to_name(err));
+        goto fail;
+    }
+
+    free(buf);
+    char detail[128];
+    snprintf(detail, sizeof(detail), "%u bytes -> %s, version %.31s", (unsigned)total, part->label, nd.version);
+    ESP_LOGI(TAG, "OTA done: %s, rebooting", detail);
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    cJSON_AddNumberToObject(resp, "size", (double)total);
+    esp_err_t sent = send_json(req, resp, 200);
+    event_log_append(LOG_SRC_SYSTEM, "-", "ota_update", true, detail);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+    return sent; /* unreachable */
+
+fail:
+    if (begun) esp_ota_abort(handle);
+    free(buf);
+    s_ota_busy = false;
+    ESP_LOGW(TAG, "OTA failed: %s", msg);
+    event_log_append(LOG_SRC_SYSTEM, "-", "ota_update", false, msg);
+    return send_error(req, code, msg);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -730,7 +965,8 @@ static esp_err_t h_status_get(httpd_req_t *req)
         cJSON *o = cJSON_CreateObject();
         cJSON_AddStringToObject(o, "label", labels[i]);
         cJSON_AddBoolToObject(o, "enabled", gpio_inputs_is_enabled(ids[i]));
-        bool level = (ids[i] == INPUT_AC1) ? ac_reading.in_band
+        /* Current levels -- what the plugs actually follow. */
+        bool level = (ids[i] == INPUT_AC1) ? ac_reading.level
                                             : gpio_inputs_get_level(ids[i]);
         cJSON_AddBoolToObject(o, "level", level);
         cJSON_AddItemToArray(inputs, o);
@@ -761,6 +997,7 @@ static esp_err_t h_status_get(httpd_req_t *req)
     cJSON_AddNumberToObject(ac_mon, "vrms", (double)ac_reading.vrms);
     cJSON_AddNumberToObject(ac_mon, "freq_hz", (double)ac_reading.freq_hz);
     cJSON_AddBoolToObject(ac_mon, "in_band", ac_reading.in_band);
+    cJSON_AddBoolToObject(ac_mon, "level", ac_reading.level);
     cJSON_AddItemToObject(root, "ac_mon", ac_mon);
 
     cJSON_AddNumberToObject(root, "uptime_s", (double)(esp_timer_get_time() / 1000000));
@@ -969,7 +1206,7 @@ esp_err_t web_server_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = CONFIG_WEB_HTTP_PORT;
     config.uri_match_fn = httpd_uri_match_wildcard;
-    config.max_uri_handlers = 40; /* 25 API/static routes + 7 captive-portal probes + 2 restart/factory-reset, some headroom */
+    config.max_uri_handlers = 44; /* ~25 API/static routes + 7 captive-portal probes + restart/factory-reset/ac-calibrate/2x OTA, some headroom */
     /* The manual on/off test button (POST /api/plugs/{id}/action) runs
      * driver_http_set() -- and therefore esp_http_client -- synchronously
      * on this httpd worker task, same as plug_manager.c's own worker_task.
@@ -1024,6 +1261,9 @@ esp_err_t web_server_start(void)
         { .uri = "/connecttest.txt",           .method = HTTP_GET, .handler = h_captive_redirect }, /* Windows 10/11 NCSI */
         { .uri = "/ncsi.txt",                  .method = HTTP_GET, .handler = h_captive_redirect }, /* Windows, older */
         { .uri = "/success.txt",               .method = HTTP_GET, .handler = h_captive_redirect }, /* Firefox/Mozilla */
+        { .uri = "/api/ac/calibrate", .method = HTTP_POST, .handler = h_ac_calibrate },
+        { .uri = "/api/system/ota", .method = HTTP_GET,  .handler = h_ota_info },
+        { .uri = "/api/system/ota", .method = HTTP_POST, .handler = h_ota_post },
         { .uri = "/api/system/restart", .method = HTTP_POST, .handler = h_system_restart },
         { .uri = "/api/system/factory_reset", .method = HTTP_POST, .handler = h_system_factory_reset },
     };
