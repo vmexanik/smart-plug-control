@@ -12,7 +12,7 @@ ESP32-S3-хаб для керування розумними розетками 
 
 ```
 CMakeLists.txt
-partitions.csv          # nvs + phy_init + otadata/ota_0/ota_1 (OTA-capable, 1.5MB/слот) + "storage" LittleFS (384KB) -- див. "OTA оновлення"
+partitions.csv          # nvs + phy_init + otadata/ota_0/ota_1 (OTA-capable, 4MB/слот) + "storage" LittleFS (384KB) -- див. "OTA оновлення"
 sdkconfig.defaults
 sdkconfig.defaults.esp32s3   # PSRAM (Octal) + 16MB флеш -- merged in automatically once `idf.py set-target esp32s3` is run
 main/

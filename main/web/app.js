@@ -1108,7 +1108,7 @@
     try {
       const w = await api('/api/wifi');
       const failedNote = w.config_error
-        ? '<br><span class="bad">Вичерпано спроби підключення (ймовірно невірний пароль або SSID) — введіть дані ще раз і натисніть "Підключити".</span>'
+        ? '<br><span class="bad">Вичерпано ліміт спроб підключення (ймовірно невірний пароль або SSID) — введіть дані ще раз і натисніть "Підключити".</span>'
         : '';
       el.innerHTML = (w.connected
         ? `<span class="good">STA: "${escapeHtml(w.ssid)}", IP ${w.sta_ip}</span>`

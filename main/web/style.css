@@ -567,3 +567,11 @@ fieldset.disabled-fieldset { opacity: 0.6; }
 .error-text { color: var(--bs-red); font-size: 0.8125rem; margin-top: 0.5rem; }
 
 #plug-form label { margin-bottom: 0.5rem; }
+
+#pf-http-fields .form-row{
+  flex-wrap: nowrap;
+}
+
+#pf-http-fields .form-row label{
+  width: 100%;
+}
