@@ -27,6 +27,8 @@ static volatile bool s_sta_connected = false;
 static bool s_have_sta_creds = false;
 static char s_sta_ssid[33] = {0};
 static char s_sta_pass[65] = {0};
+/* Soft-AP password in use: NVS "ap_pass" if set (and valid), else Kconfig. */
+static char s_ap_pass[65] = {0};
 
 /* After this many consecutive disconnects with a "this won't fix itself by
  * retrying" reason, stop auto-reconnecting and let the UI surface it instead
@@ -256,6 +258,36 @@ static bool load_creds(char *ssid, size_t ssid_size, char *pass, size_t pass_siz
     return (e1 == ESP_OK && ssid[0] != '\0' && e2 == ESP_OK);
 }
 
+/* WPA2-PSK passphrase: 8..63 printable ASCII characters. */
+static bool ap_pass_valid(const char *p)
+{
+    size_t n = p ? strlen(p) : 0;
+    if (n < 8 || n > 63) return false;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)p[i];
+        if (c < 0x20 || c > 0x7E) return false;
+    }
+    return true;
+}
+
+static void set_default_ap_pass(void)
+{
+    snprintf(s_ap_pass, sizeof(s_ap_pass), "%s", CONFIG_AP_FALLBACK_PASSWORD);
+}
+
+static void load_ap_pass(void)
+{
+    set_default_ap_pass();
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+    char buf[sizeof(s_ap_pass)] = {0};
+    size_t len = sizeof(buf);
+    if (nvs_get_str(h, "ap_pass", buf, &len) == ESP_OK && ap_pass_valid(buf)) {
+        snprintf(s_ap_pass, sizeof(s_ap_pass), "%s", buf);
+    }
+    nvs_close(h);
+}
+
 esp_err_t wifi_manager_init_netif(void)
 {
     s_scan_lock = xSemaphoreCreateMutex();
@@ -282,6 +314,7 @@ esp_err_t wifi_manager_start(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, NULL));
 
     s_have_sta_creds = load_creds(s_sta_ssid, sizeof(s_sta_ssid), s_sta_pass, sizeof(s_sta_pass));
+    load_ap_pass();
 
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
@@ -291,8 +324,8 @@ esp_err_t wifi_manager_start(void)
     ap_cfg.ap.ssid_len = strlen((char *)ap_cfg.ap.ssid);
     ap_cfg.ap.channel = 1;
     ap_cfg.ap.max_connection = 4;
-    if (strlen(CONFIG_AP_FALLBACK_PASSWORD) >= 8) {
-        strncpy((char *)ap_cfg.ap.password, CONFIG_AP_FALLBACK_PASSWORD, sizeof(ap_cfg.ap.password) - 1);
+    if (strlen(s_ap_pass) >= 8) {
+        strncpy((char *)ap_cfg.ap.password, s_ap_pass, sizeof(ap_cfg.ap.password) - 1);
         ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
     } else {
         ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
@@ -347,7 +380,7 @@ esp_err_t wifi_manager_start(void)
     esp_wifi_set_ps(WIFI_PS_NONE);
 
     ESP_LOGI(TAG, "AP SSID: %s (password %s)", ap_cfg.ap.ssid,
-             ap_cfg.ap.authmode == WIFI_AUTH_OPEN ? "<open>" : CONFIG_AP_FALLBACK_PASSWORD);
+             ap_cfg.ap.authmode == WIFI_AUTH_OPEN ? "<open>" : s_ap_pass);
     if (s_have_sta_creds) {
         ESP_LOGI(TAG, "Connecting to STA SSID: %s", s_sta_ssid);
     } else {
@@ -398,15 +431,49 @@ esp_err_t wifi_manager_set_credentials(const char *ssid, const char *password)
     return ESP_OK;
 }
 
+esp_err_t wifi_manager_set_ap_password(const char *password)
+{
+    if (!ap_pass_valid(password)) return ESP_ERR_INVALID_ARG;
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_str(h, "ap_pass", password);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    if (err != ESP_OK) return err;
+
+    snprintf(s_ap_pass, sizeof(s_ap_pass), "%s", password);
+    return ESP_OK;
+}
+
+esp_err_t wifi_manager_apply_ap_password(void)
+{
+    wifi_config_t cfg;
+    esp_err_t err = esp_wifi_get_config(WIFI_IF_AP, &cfg);
+    if (err != ESP_OK) return err;
+    memset(cfg.ap.password, 0, sizeof(cfg.ap.password));
+    strncpy((char *)cfg.ap.password, s_ap_pass, sizeof(cfg.ap.password) - 1);
+    cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    return esp_wifi_set_config(WIFI_IF_AP, &cfg);
+}
+
+void wifi_manager_get_ap_password(char *pass_out, size_t pass_size)
+{
+    if (!pass_out || !pass_size) return;
+    snprintf(pass_out, pass_size, "%s", s_ap_pass);
+}
+
 esp_err_t wifi_manager_erase_credentials(void)
 {
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
     if (err != ESP_OK) return err;
-    /* Only ssid/pass are ever stored in this namespace (see load_creds()/
-     * wifi_manager_set_credentials() above), so erasing the whole
-     * namespace is equivalent to -- and simpler than -- erasing each key
-     * individually. */
+    /* Only ssid/pass/ap_pass are ever stored in this namespace (see
+     * load_creds()/wifi_manager_set_credentials()/
+     * wifi_manager_set_ap_password()), so erasing the whole namespace is
+     * equivalent to -- and simpler than -- erasing each key individually.
+     * This is what makes a factory reset also reset the AP password. */
     nvs_erase_all(h);
     err = nvs_commit(h);
     nvs_close(h);
@@ -414,6 +481,7 @@ esp_err_t wifi_manager_erase_credentials(void)
     s_have_sta_creds = false;
     memset(s_sta_ssid, 0, sizeof(s_sta_ssid));
     memset(s_sta_pass, 0, sizeof(s_sta_pass));
+    set_default_ap_pass();
 
     return err;
 }

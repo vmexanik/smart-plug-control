@@ -1091,7 +1091,7 @@
     } catch (e) {
       /* expected -- the device drops the connection as it restarts */
     }
-    result.textContent = 'Пристрій скинуто й перезавантажується. Підключіться до його точки доступу налаштування (SmartPlug-XXXXXX), щоб налаштувати заново.';
+    result.textContent = 'Пристрій скинуто й перезавантажується. Підключіться до його точки доступу налаштування (SmartPlug-XXXXXX, стандартний пароль), щоб налаштувати заново.';
   });
 
   /* ---------------- wifi ---------------- */
@@ -1114,12 +1114,13 @@
         ? `<span class="good">STA: "${escapeHtml(w.ssid)}", IP ${w.sta_ip}</span>`
         : `<span class="bad">STA: Не підключено${w.ssid ? ` (збережено SSID "${escapeHtml(w.ssid)}")` : ''}</span>`) +
         failedNote +
-        `<br>AP: ${w.ap_ssid ? `${escapeHtml(w.ap_ssid)}, ` : ''}IP ${w.ap_ip}`;
+        `<br>AP: ${w.ap_ssid ? `"${escapeHtml(w.ap_ssid)}", ` : ''}IP ${w.ap_ip}`;
       /* Prefill both fields with the real stored values -- otherwise
        * clicking "Підключити" without retyping the password resubmits an
        * empty one and silently breaks a working connection. */
       $('#wifi-ssid').value = w.ssid;
       $('#wifi-pass').value = w.password;
+      if (document.activeElement !== $('#ap-pass')) $('#ap-pass').value = w.ap_password || '';
     } catch (e) {
       el.innerHTML = `<span class="bad">Помилка: ${e.message}</span>`;
     }
@@ -1141,6 +1142,33 @@
     }
   });
 
+  /* ---------------- soft-AP password ---------------- */
+  $('#btn-toggle-ap-pass').addEventListener('click', () => {
+    const input = $('#ap-pass');
+    const btn = $('#btn-toggle-ap-pass');
+    const showing = input.type === 'text';
+    input.type = showing ? 'password' : 'text';
+    btn.textContent = showing ? 'Показати' : 'Сховати';
+  });
+
+  $('#btn-save-ap').addEventListener('click', async () => {
+    const result = $('#ap-save-result');
+    const password = $('#ap-pass').value;
+    if (password.length < 8 || password.length > 63) {
+      result.textContent = 'Пароль AP має бути від 8 до 63 символів';
+      result.className = 'save-result error';
+      return;
+    }
+    try {
+      await api('/api/wifi/ap', { method: 'POST', body: JSON.stringify({ password }) });
+      result.textContent = 'Збережено. Точка доступу перезапускається — підключіться до неї заново з новим паролем.';
+      result.className = 'save-result';
+    } catch (e) {
+      result.textContent = 'Помилка: ' + e.message;
+      result.className = 'save-result error';
+    }
+  });
+
   /* ---------------- time ---------------- */
   async function loadTime() {
     const el = $('#time-status');
@@ -1148,8 +1176,11 @@
       const t = await api('/api/time');
       const d = new Date(t.epoch * 1000);
       const sourceTxt = { ntp: 'NTP', manual: 'вручну', none: 'не синхронізовано' }[t.source] || t.source;
+      const ntpNote = t.last_ntp_sync
+        ? `; остання NTP-синхронізація: ${new Date(t.last_ntp_sync * 1000).toLocaleString()}, далі раз на ${t.sync_interval_h} год`
+        : '';
       el.innerHTML = t.synced
-        ? `<span class="good">Час пристрою: ${d.toLocaleString()} (${sourceTxt})</span>`
+        ? `<span class="good">Час пристрою: ${d.toLocaleString()} (${sourceTxt}${ntpNote})</span>`
         : `<span class="bad">Час не синхронізовано: ${d.toLocaleString()} — або зачекайте NTP-синхронізацію (потрібен інтернет), або встановіть вручну нижче</span>`;
 
       /* Prefill the manual input with "now" (browser time) for convenience,

@@ -4,6 +4,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_littlefs.h"
+#include "nvs.h"
 #include "cJSON.h"
 #include "sdkconfig.h"
 #include "storage.h"
@@ -31,6 +32,40 @@ esp_err_t storage_init(void)
         ESP_LOGI(TAG, "LittleFS mounted: %d/%d bytes used", (int)used, (int)total);
     }
     return ESP_OK;
+}
+
+/* ---- Voltmeter calibration: NVS, survives factory reset ---- */
+
+#define CAL_NVS_NS  "ac_cal"
+#define CAL_NVS_KEY "k"
+#define CAL_K_VALID(k) ((k) > 0.01f && (k) < 10.0f)
+
+float storage_load_cal_k(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(CAL_NVS_NS, NVS_READONLY, &h) != ESP_OK) return 0.0f;
+    float k = 0.0f;
+    size_t len = sizeof(k);
+    esp_err_t err = nvs_get_blob(h, CAL_NVS_KEY, &k, &len);
+    nvs_close(h);
+    if (err != ESP_OK || len != sizeof(k) || !CAL_K_VALID(k)) return 0.0f;
+    return k;
+}
+
+esp_err_t storage_save_cal_k(float k)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(CAL_NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    if (CAL_K_VALID(k)) {
+        err = nvs_set_blob(h, CAL_NVS_KEY, &k, sizeof(k));
+    } else {
+        err = nvs_erase_key(h, CAL_NVS_KEY);
+        if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+    }
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err;
 }
 
 void storage_force_fixed_inputs(system_settings_t *settings)
@@ -269,7 +304,7 @@ static void settings_from_json(const cJSON *root, system_settings_t *s, const sy
     }
 }
 
-esp_err_t storage_load_config(app_config_t *cfg)
+static esp_err_t load_config_file(app_config_t *cfg)
 {
     /* app_config_t is ~26KB (MAX_PLUGS * sizeof(plug_t)) -- must not be a
      * stack local, it would blow the caller's task stack. */
@@ -339,6 +374,24 @@ esp_err_t storage_load_config(app_config_t *cfg)
     return ESP_OK;
 }
 
+esp_err_t storage_load_config(app_config_t *cfg)
+{
+    esp_err_t err = load_config_file(cfg);
+    if (err != ESP_OK) return err;
+
+    /* NVS is the source of truth for the voltmeter calibration (it survives
+     * a factory reset, config.json does not). Older firmware kept K only in
+     * config.json: migrate it into NVS the first time. */
+    float k = storage_load_cal_k();
+    if (k > 0.0f) {
+        cfg->settings.ac_mon.cal_k = k;
+    } else if (CAL_K_VALID(cfg->settings.ac_mon.cal_k)) {
+        storage_save_cal_k(cfg->settings.ac_mon.cal_k);
+        ESP_LOGI(TAG, "Migrated voltmeter calibration K=%.4f to NVS", (double)cfg->settings.ac_mon.cal_k);
+    }
+    return ESP_OK;
+}
+
 esp_err_t storage_save_config(const app_config_t *cfg)
 {
     cJSON *root = cJSON_CreateObject();
@@ -396,6 +449,8 @@ esp_err_t storage_erase_all(void)
     if (!defaults) return ESP_ERR_NO_MEM;
 
     storage_default_config(defaults);
+    /* Keep the voltmeter calibration across the reset (it lives in NVS). */
+    defaults->settings.ac_mon.cal_k = storage_load_cal_k();
     esp_err_t err = storage_save_config(defaults);
     free(defaults);
     return err;

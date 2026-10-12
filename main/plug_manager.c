@@ -883,7 +883,10 @@ esp_err_t plug_manager_set_ac_cal_k(float k)
     s_cfg.settings.ac_mon.cal_k = k;
     esp_err_t err = save_locked();
     xSemaphoreGive(s_lock);
-    return err;
+    /* Also keep it in NVS, where it survives a factory reset (k == 0, i.e.
+     * "reset to default", erases it there too). */
+    esp_err_t nvs_err = storage_save_cal_k(k);
+    return err != ESP_OK ? err : nvs_err;
 }
 
 bool plug_manager_is_responsive(uint32_t timeout_ms)

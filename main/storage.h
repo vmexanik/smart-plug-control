@@ -30,12 +30,21 @@ esp_err_t storage_save_config(const app_config_t *cfg);
  * older firmware. */
 void storage_force_fixed_inputs(system_settings_t *settings);
 
+/* Voltmeter calibration coefficient (ac_mon.cal_k), kept in its own NVS
+ * namespace ("ac_cal") rather than only in config.json, so that it survives
+ * storage_erase_all() / a factory reset. storage_load_cal_k() returns 0 if
+ * nothing valid is stored ("use the Kconfig default");
+ * storage_save_cal_k(k) with k outside (0.01, 10) erases the stored value. */
+float storage_load_cal_k(void);
+esp_err_t storage_save_cal_k(float k);
+
 /* Resets the persisted plug/settings config to firmware defaults (the same
  * shape storage_default_config() produces -- no plugs, Kconfig-default
  * inputs/log limits/AC-monitor band) and writes it to config.json,
- * discarding whatever was there before. Does NOT touch the NVS Wi-Fi
- * credentials or the event log -- see wifi_manager_erase_credentials() /
- * event_log_clear() for those. POST /api/system/factory_reset in
+ * discarding whatever was there before. The voltmeter calibration is
+ * deliberately KEPT (see storage_load_cal_k()). Does NOT touch the NVS
+ * Wi-Fi credentials / AP password or the event log -- see
+ * wifi_manager_erase_credentials() / event_log_clear() for those. POST /api/system/factory_reset in
  * web_server.c calls all three together for a full device reset. */
 esp_err_t storage_erase_all(void);
 

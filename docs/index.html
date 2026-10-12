@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Plug Control — інструкція</title>
+<meta name="description" content="Smart Plug Control: хаб на ESP32-S3, що вмикає й вимикає розумні розетки за напругою мережі та сигналами входів. Підключення, налаштування, оновлення.">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">До змісту</a>
+<div class="shell">
+<aside class="side" id="side"><noscript><a href="index.html">Огляд</a></noscript></aside>
+<main id="main">
+
+<section class="hero">
+  <h1>Smart Plug Control</h1>
+  <p class="lead">Невеликий хаб на ESP32-S3, який сам вмикає й вимикає розумні розетки за станом входів: напругою в мережі та двома дискретними сигналами. Налаштовується з телефону або комп'ютера через вбудований веб-інтерфейс, без хмари й без застосунків.</p>
+  <div class="actions">
+    <a class="btn primary" href="setup.html">Почати налаштування</a>
+    <a class="btn" href="demo/index.html">Спробувати інтерфейс (демо)</a>
+  </div>
+  <div class="badges">
+    <span class="pill on">Wi-Fi + власна точка доступу</span>
+    <span class="pill on">Shelly · Tasmota · HTTP · MQTT</span>
+    <span class="pill on">Оновлення прошивки з браузера</span>
+  </div>
+</section>
+
+<h2 id="how">Як це працює</h2>
+<p>Хаб стежить за трьома входами: <strong>AC1</strong> (напруга й частота мережі, вимірюється модулем ZMPT101B) та <strong>DC1</strong>, <strong>DC2</strong> (дискретні входи). Кожну розетку можна «прив'язати» до одного з входів: є сигнал, і розетка вмикається, зник, і вимикається. Розетки керуються по Wi-Fi.</p>
+
+<figure>
+<svg viewBox="0 0 760 300" role="img" aria-label="Схема: входи AC1, DC1, DC2 підключені до хаба ESP32-S3, який по Wi-Fi керує розетками" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, Roboto, sans-serif">
+  <style>
+    .b { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+    .hub { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2; }
+    .t { fill: var(--text); font-size: 15px; font-weight: 600; }
+    .s { fill: var(--muted); font-size: 12.5px; }
+    .a { stroke: var(--muted); stroke-width: 2; fill: none; marker-end: url(#ah); }
+    .w { stroke: var(--accent); stroke-width: 2; fill: none; stroke-dasharray: 5 5; marker-end: url(#ah2); }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--muted)"/></marker>
+    <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--accent)"/></marker>
+  </defs>
+
+  <rect class="b" x="20" y="30" width="170" height="64" rx="10"/>
+  <text class="t" x="36" y="58">AC1</text>
+  <text class="s" x="36" y="78">230 В · ZMPT101B</text>
+
+  <rect class="b" x="20" y="118" width="170" height="64" rx="10"/>
+  <text class="t" x="36" y="146">DC1</text>
+  <text class="s" x="36" y="166">дискретний вхід</text>
+
+  <rect class="b" x="20" y="206" width="170" height="64" rx="10"/>
+  <text class="t" x="36" y="234">DC2</text>
+  <text class="s" x="36" y="254">дискретний вхід</text>
+
+  <path class="a" d="M190 62 H260 Q280 62 280 82 V120 H290"/>
+  <path class="a" d="M190 150 H290"/>
+  <path class="a" d="M190 238 H260 Q280 238 280 218 V180 H290"/>
+
+  <rect class="hub" x="290" y="85" width="190" height="130" rx="14"/>
+  <text class="t" x="385" y="125" text-anchor="middle">Хаб ESP32-S3</text>
+  <text class="s" x="385" y="148" text-anchor="middle">логіка входів</text>
+  <text class="s" x="385" y="166" text-anchor="middle">веб-інтерфейс</text>
+  <text class="s" x="385" y="184" text-anchor="middle">журнал подій</text>
+
+  <path class="w" d="M480 120 H540"/>
+  <path class="w" d="M480 150 H540"/>
+  <path class="w" d="M480 180 H540"/>
+  <text class="s" x="510" y="108" text-anchor="middle">Wi-Fi</text>
+
+  <rect class="b" x="545" y="90" width="195" height="40" rx="9"/>
+  <text class="t" x="562" y="115">Shelly / Tasmota</text>
+  <rect class="b" x="545" y="135" width="195" height="40" rx="9"/>
+  <text class="t" x="562" y="160">HTTP-розетка</text>
+  <rect class="b" x="545" y="180" width="195" height="40" rx="9"/>
+  <text class="t" x="562" y="205">MQTT</text>
+</svg>
+<figcaption>Входи → хаб → розетки. Хаб тримає свою точку доступу завжди, тож до нього можна підключитись, навіть якщо домашній Wi-Fi недоступний.</figcaption>
+</figure>
+
+<h2 id="features">Що вміє</h2>
+<div class="grid">
+  <div class="card"><h3>Керування за входами</h3><p>Розетка вмикається, поки на її вході є сигнал. Для кожної окремо можна інвертувати логіку та задати затримку вмикання від 0 до 600 с.</p></div>
+  <div class="card"><h3>Контроль напруги мережі</h3><p>Вимірює напругу й частоту. Якщо вони виходять за задані межі або мережі немає, прив'язані розетки вимикаються.</p></div>
+  <div class="card"><h3>Пошук розеток</h3><p>Кнопка «Знайти в мережі» знаходить Shelly та Tasmota у домашній мережі й підставляє налаштування сама.</p></div>
+  <div class="card"><h3>Споживання</h3><p>Для розеток з енергомоніторингом показує потужність, напругу й струм, оновлюючи кожні 10 с.</p></div>
+  <div class="card"><h3>Оновлення з браузера</h3><p>Нова прошивка завантажується з веб-інтерфейсу. Якщо вона не стартує, пристрій відкотиться на попередню.</p></div>
+  <div class="card"><h3>Самовідновлення</h3><p>Сторожові таймери перезавантажують хаб при зависанні. Причина перезавантаження лишається в журналі.</p></div>
+</div>
+
+<h2 id="quick">Швидкий старт</h2>
+<ol class="steps">
+  <li><strong>Підключіть входи й живлення</strong>
+    Схема та піни на сторінці <a href="hardware.html">Підключення</a>. Роботи з мережею 230 В виконує лише кваліфікована людина.</li>
+  <li><strong>Підключіться до точки доступу хаба</strong>
+    Мережа <code>SmartPlug-XXXXXX</code>, пароль за замовчуванням <code>plugsetup</code>. Сторінка налаштувань відкриється сама або за адресою <code>http://192.168.4.1</code>.</li>
+  <li><strong>Вкажіть домашній Wi-Fi</strong>
+    Вкладка «Системні налаштування», розділ Wi-Fi: <em>Знайти мережі</em>, пароль, <em>Підключити</em>. Докладно на сторінці <a href="setup.html">Перше налаштування</a>.</li>
+  <li><strong>Додайте розетки</strong>
+    Вкладка «Розетки»: «Знайти в мережі» або «Додати розетку» вручну. Про всі поля читайте в розділі <a href="interface.html">Веб-інтерфейс</a>.</li>
+  <li><strong>Прив'яжіть розетки до входів і відкалібруйте напругу</strong>
+    Калібрування займає хвилину й потребує мультиметра: <a href="ac.html">Напруга мережі (AC1)</a>.</li>
+</ol>
+
+<h2 id="specs">Коротко про пристрій</h2>
+<div class="tscroll"><table>
+  <tr><th>Параметр</th><th>Значення</th></tr>
+  <tr><td>Мікроконтролер</td><td>ESP32-S3-WROOM-1-N16R8 (16 МБ flash, 8 МБ PSRAM)</td></tr>
+  <tr><td>Входи</td><td>AC1 (ZMPT101B), DC1, DC2</td></tr>
+  <tr><td>Мережа</td><td>Wi-Fi 2,4 ГГц, власна точка доступу <code>192.168.4.1</code> завжди активна</td></tr>
+  <tr><td>Керування розетками</td><td>HTTP (Shelly Gen1/Gen2+/Gen3, Tasmota, ESPHome, довільні URL) та MQTT</td></tr>
+  <tr><td>Не підтримується</td><td>Tuya / Smart Life, Xiaomi (прямо), Zigbee (поки заглушка)</td></tr>
+  <tr><td>Оновлення</td><td>OTA з веб-інтерфейсу, два слоти по 4 МБ, автоматичний відкат</td></tr>
+  <tr><td>Індикація</td><td>Світлодіод блимає раз на секунду, поки прошивка жива</td></tr>
+</table></div>
+
+<div class="callout note">
+  <span class="t">Автентифікації у веб-інтерфейсі немає</span>
+  Будь-хто, хто підключений до тієї ж мережі, може змінити налаштування. Тримайте хаб у довіреній домашній мережі й змініть пароль точки доступу, якщо пристрій стоїть там, де до нього можуть підключитись сторонні (пароль задається в прошивці, див. <a href="maintenance.html">Оновлення і скидання</a>).
+</div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

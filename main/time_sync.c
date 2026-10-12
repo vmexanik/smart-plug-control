@@ -1,7 +1,10 @@
 #include <string.h>
 #include <sys/time.h>
+#include <time.h>
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
+#include "esp_sntp.h"
+#include "sdkconfig.h"
 #include "esp_log.h"
 #include "time_sync.h"
 
@@ -12,6 +15,9 @@ static const char *TAG = "time_sync";
 static char s_ntp_server[64];
 static volatile bool s_synced = false;
 static volatile bool s_via_ntp = false;
+/* uint32_t (not time_t/int64_t) so the write from the lwIP task and the read
+ * from an httpd worker are each a single atomic 32-bit access. Good until 2106. */
+static volatile uint32_t s_last_ntp_epoch = 0;
 static bool s_initialized = false;
 
 static void on_time_sync(struct timeval *tv)
@@ -19,7 +25,9 @@ static void on_time_sync(struct timeval *tv)
     (void)tv;
     s_synced = true;
     s_via_ntp = true;
-    ESP_LOGI(TAG, "Time synchronized via NTP (%s)", s_ntp_server);
+    s_last_ntp_epoch = (uint32_t)time(NULL);
+    ESP_LOGI(TAG, "Time synchronized via NTP (%s), next re-sync in %d h",
+             s_ntp_server, CONFIG_NTP_SYNC_INTERVAL_HOURS);
 }
 
 esp_err_t time_sync_init(const char *ntp_server)
@@ -44,13 +52,21 @@ esp_err_t time_sync_init(const char *ntp_server)
     config.renew_servers_after_new_IP = true;
     config.ip_event_to_renew = IP_EVENT_STA_GOT_IP;
 
+    /* Re-sync once per CONFIG_NTP_SYNC_INTERVAL_HOURS (default 24 h) instead of
+     * lwIP's compile-time CONFIG_LWIP_SNTP_UPDATE_DELAY (1 h): 1 request/day
+     * instead of 24. Takes effect for the next scheduled request; failed
+     * requests are still retried by lwIP's own short back-off, so a missed
+     * sync does not wait a whole day. */
+    sntp_set_sync_interval((uint32_t)CONFIG_NTP_SYNC_INTERVAL_HOURS * 3600u * 1000u);
+
     esp_err_t err = esp_netif_sntp_init(&config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_netif_sntp_init failed: %s", esp_err_to_name(err));
         return err;
     }
     s_initialized = true;
-    ESP_LOGI(TAG, "NTP client armed against %s (syncs once Wi-Fi is up)", s_ntp_server);
+    ESP_LOGI(TAG, "NTP client armed against %s (syncs once Wi-Fi is up, then every %d h)",
+             s_ntp_server, CONFIG_NTP_SYNC_INTERVAL_HOURS);
     return ESP_OK;
 }
 
@@ -63,6 +79,11 @@ const char *time_sync_source(void)
 {
     if (!s_synced) return "none";
     return s_via_ntp ? "ntp" : "manual";
+}
+
+int64_t time_sync_last_ntp_epoch(void)
+{
+    return (int64_t)s_last_ntp_epoch;
 }
 
 esp_err_t time_sync_set_manual(int64_t epoch_seconds)

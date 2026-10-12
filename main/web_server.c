@@ -867,8 +867,10 @@ static esp_err_t h_system_restart(httpd_req_t *req)
 }
 
 /* Full factory reset: erases the plug/settings config (back to firmware
- * defaults), the stored Wi-Fi STA credentials, and the event log, then
- * reboots -- the device comes back up exactly as it would on first boot,
+ * defaults), the stored Wi-Fi STA credentials plus the custom AP password
+ * (same NVS namespace -> AP is back to the Kconfig default password after
+ * the reboot), and the event log, then reboots. The voltmeter calibration
+ * is deliberately kept (own NVS namespace, see storage_load_cal_k()) -- the device comes back up exactly as it would on first boot,
  * reachable only via its always-on setup AP until reconfigured. The three
  * erase steps are independent of each other by design (storage.c/
  * wifi_manager.c/event_log.c each own a different partition/namespace), so
@@ -890,7 +892,7 @@ static esp_err_t h_system_factory_reset(httpd_req_t *req)
     event_log_clear();
     event_log_append(LOG_SRC_API, "-", "factory_reset",
                       cfg_err == ESP_OK && wifi_err == ESP_OK,
-                      "full device reset (config + wifi credentials erased) requested via web UI");
+                      "full device reset (config, wifi + AP password erased, voltmeter calibration kept) requested via web UI");
 
     /* Best-effort: give the response above and the fresh log line's write
      * a moment to actually land before the reset -- same reasoning as
@@ -1034,6 +1036,11 @@ static esp_err_t h_wifi_get(httpd_req_t *req)
     char ap_ssid[33];
     wifi_manager_get_ap_ssid(ap_ssid, sizeof(ap_ssid));
     cJSON_AddStringToObject(root, "ap_ssid", ap_ssid);
+    /* Same reasoning as "password" above: no auth on this UI, so echoing it
+     * to prefill the form is not a new exposure. */
+    char ap_pass[65];
+    wifi_manager_get_ap_password(ap_pass, sizeof(ap_pass));
+    cJSON_AddStringToObject(root, "ap_password", ap_pass);
     return send_json(req, root, 200);
 }
 
@@ -1059,6 +1066,41 @@ static esp_err_t h_wifi_post(httpd_req_t *req)
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddBoolToObject(resp, "ok", true);
     return send_json(req, resp, 200);
+}
+
+/* POST {"password": "..."} -- new soft-AP password (8..63 ASCII chars).
+ * Saved to NVS immediately; the running AP is reconfigured ~300 ms AFTER the
+ * response has gone out, because that kicks all AP stations (possibly the
+ * very browser that sent this request) and they must rejoin with the new
+ * password. A factory reset erases it (wifi_manager_erase_credentials()). */
+static esp_err_t h_wifi_ap_post(httpd_req_t *req)
+{
+    char body[200];
+    if (recv_body(req, body, sizeof(body)) != ESP_OK) {
+        return send_error(req, 400, "body too large or missing");
+    }
+    cJSON *root = cJSON_Parse(body);
+    if (!root) return send_error(req, 400, "invalid json");
+
+    char pass[65];
+    jget_str(root, "password", pass, sizeof(pass));
+    cJSON_Delete(root);
+
+    esp_err_t err = wifi_manager_set_ap_password(pass);
+    if (err == ESP_ERR_INVALID_ARG) {
+        return send_error(req, 400, "пароль точки доступу: 8–63 символи (лише ASCII)");
+    }
+    if (err != ESP_OK) return send_error(req, 500, "не вдалося зберегти пароль точки доступу");
+
+    event_log_append(LOG_SRC_API, "-", "ap_password_changed", true, NULL);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", true);
+    esp_err_t sret = send_json(req, resp, 200);
+
+    vTaskDelay(pdMS_TO_TICKS(300));
+    wifi_manager_apply_ap_password();
+    return sret;
 }
 
 static esp_err_t h_wifi_scan_start(httpd_req_t *req)
@@ -1105,6 +1147,9 @@ static esp_err_t h_time_get(httpd_req_t *req)
     cJSON_AddNumberToObject(root, "epoch", (double)time(NULL));
     cJSON_AddBoolToObject(root, "synced", time_sync_is_synced());
     cJSON_AddStringToObject(root, "source", time_sync_source());
+    /* 0 = never synced via NTP (e.g. clock only set manually). */
+    cJSON_AddNumberToObject(root, "last_ntp_sync", (double)time_sync_last_ntp_epoch());
+    cJSON_AddNumberToObject(root, "sync_interval_h", CONFIG_NTP_SYNC_INTERVAL_HOURS);
     return send_json(req, root, 200);
 }
 
@@ -1255,6 +1300,7 @@ esp_err_t web_server_start(void)
         { .uri = "/api/status",    .method = HTTP_GET,    .handler = h_status_get },
         { .uri = "/api/wifi",      .method = HTTP_GET,    .handler = h_wifi_get },
         { .uri = "/api/wifi",      .method = HTTP_POST,   .handler = h_wifi_post },
+        { .uri = "/api/wifi/ap",   .method = HTTP_POST,   .handler = h_wifi_ap_post },
         { .uri = "/api/wifi/scan", .method = HTTP_POST,   .handler = h_wifi_scan_start },
         { .uri = "/api/wifi/scan", .method = HTTP_GET,    .handler = h_wifi_scan_status },
         { .uri = "/api/time",      .method = HTTP_GET,    .handler = h_time_get },

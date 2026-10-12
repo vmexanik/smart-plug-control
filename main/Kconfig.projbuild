@@ -52,6 +52,19 @@ menu "Smart Plug Control"
             UI still allows setting the clock manually via POST /api/time,
             which is independent of this setting.
 
+    config NTP_SYNC_INTERVAL_HOURS
+        int "NTP re-sync interval (hours)"
+        default 24
+        range 1 168
+        help
+            How often the SNTP client re-queries the NTP server once the
+            clock has been set. 24 = once a day. The board has no RTC
+            backup battery, so the clock only free-runs on the ESP32's
+            crystal between syncs: at +-20 ppm that is at most
+            86400 s * 20e-6 = ~1.7 s of drift per day, which is plenty for
+            scheduling. A sync is also (re)started whenever STA gets an IP,
+            so a reboot or a Wi-Fi reconnect re-syncs immediately.
+
     menu "Network scan / device fingerprinting"
         config FINGERPRINT_HTTP_TIMEOUT_MS
             int "HTTP timeout per fingerprint request (ms)"

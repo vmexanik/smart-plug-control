@@ -30,7 +30,8 @@ esp_err_t wifi_manager_init_netif(void);
 
 /*
  * Always runs Wi-Fi in APSTA mode:
- *  - AP "SmartPlug-XXXXXX" (password from Kconfig AP_FALLBACK_PASSWORD) is
+ *  - AP "SmartPlug-XXXXXX" (password: the one saved in NVS via
+ *    wifi_manager_set_ap_password(), else Kconfig AP_FALLBACK_PASSWORD) is
  *    always on at 192.168.4.1, so the web UI is reachable even if STA
  *    credentials are missing/wrong.
  *  - STA connects using credentials stored in NVS (namespace "wifi"), if any.
@@ -44,9 +45,29 @@ esp_err_t wifi_manager_start(void);
 /* Persists new STA credentials to NVS and (re)connects without reboot. */
 esp_err_t wifi_manager_set_credentials(const char *ssid, const char *password);
 
-/* Erases the STA credentials (SSID+password) persisted in NVS (namespace
- * "wifi") and clears the in-memory copies, reverting the device to
- * "no STA configured, AP-only" -- the same state as first boot. Callers
+/* Saves a new soft-AP password to NVS (namespace "wifi", key "ap_pass").
+ * Must be a valid WPA2 passphrase: 8..63 printable ASCII characters,
+ * otherwise ESP_ERR_INVALID_ARG (an open AP is deliberately not selectable
+ * at runtime). Does NOT touch the running AP -- call
+ * wifi_manager_apply_ap_password() for that, ideally after the HTTP
+ * response has been sent, since reconfiguring the AP kicks every station
+ * (including the browser that asked for the change if it is on the AP). */
+esp_err_t wifi_manager_set_ap_password(const char *password);
+
+/* Pushes the password saved by wifi_manager_set_ap_password() into the
+ * running soft-AP (esp_wifi_set_config(WIFI_IF_AP)); stations must
+ * reconnect with the new password. */
+esp_err_t wifi_manager_apply_ap_password(void);
+
+/* Current soft-AP password (saved one, or the Kconfig default). Like the
+ * STA password above, it is echoed to the web UI (which has no auth). */
+void wifi_manager_get_ap_password(char *pass_out, size_t pass_size);
+
+/* Erases the STA credentials (SSID+password) AND the custom AP password
+ * persisted in NVS (namespace "wifi") and clears the in-memory copies,
+ * reverting the device to "no STA configured, AP-only, default AP
+ * password" -- the same state as first boot. (The AP password returns to
+ * the Kconfig default in the running AP only after the next boot.) Callers
  * that don't immediately reboot will see wifi_manager_get_status()'s
  * ssid_out go back to empty right away; esp_wifi_disconnect()/connect()
  * are deliberately NOT called here (unlike wifi_manager_set_credentials()),

@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Smart Plug Control</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Smart Plug Control</h1>
+  <div id="status-bar" class="status-bar">
+    <span id="wifi-status-line">завантаження статусу…</span> <br>
+    AP: <span id="ap-ip-val">-</span> <br>
+    Входи: <span id="inputs-status-line">-</span> <br>
+    uptime <span id="uptime-val">-</span>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab-btn active" data-tab="plugs">Розетки</button>
+  <button class="tab-btn" data-tab="settings">Системні налаштування</button>
+  <button class="tab-btn" data-tab="log">Журнал подій</button>
+</nav>
+
+<main>
+  <section id="tab-plugs" class="tab-content active">
+    <div class="toolbar">
+      <button id="btn-add-plug" class="primary">+ Додати розетку</button>
+      <button id="btn-scan-network">Знайти в мережі</button>
+    </div>
+    <div class="device-list" id="plugs-tbody"></div>
+  </section>
+
+  <section id="tab-settings" class="tab-content">
+    <h2>Вхідні тригери</h2>
+    <p class="hint">Оберіть, які тригери використовує пристрій (можна декілька одночасно)</p>
+    <div class="inputs-list" id="inputs-tbody"></div>
+
+    <h2>Налаштування входу AC</h2>
+    <p class="hint">Вимір напруги та частоти входу АС.</p>
+    <div id="ac-mon-status" class="status-block"></div>
+    <div class="form-grid">
+      <label>Мін. напруга, В
+        <input type="number" id="set-acmon-vmin" min="100" max="300" step="1">
+      </label>
+      <label>Макс. напруга, В
+        <input type="number" id="set-acmon-vmax" min="100" max="300" step="1">
+      </label>
+      <label>Мін. частота, Гц
+        <input type="number" id="set-acmon-fmin" min="40" max="65" step="0.1">
+      </label>
+      <label>Макс. частота, Гц
+        <input type="number" id="set-acmon-fmax" min="40" max="65" step="0.1">
+      </label>
+    </div>
+
+    <h2>Калібрування входу АС</h2>
+    <p class="hint">
+      Виміряйте напругу на вході мультиметром, введіть значення і натисніть «Відкалібрувати» — пристрій сам підлаштує покази (займає ~2 с). 
+      Налаштування застосовується миттєво. Окреме збереження непотрібне.
+      Калібрування зберігається й після скидання до заводських налаштувань; щоб прибрати його, натисніть «Скинути».</p>
+    <div class="form-grid">
+      <label>Напруга за мультиметром, В
+        <div class="input-with-btn">
+          <input type="number" id="acmon-cal-ref" min="50" max="400" step="0.1" placeholder="напр. 230.0">
+          <button type="button" id="btn-ac-calibrate" class="primary">Відкалібрувати</button>
+          <button type="button" id="btn-ac-cal-reset">Скинути</button>
+        </div>
+      </label>
+    </div>
+    <div id="ac-cal-info" class="hint"></div>
+    <span id="ac-cal-result" class="save-result"></span>
+
+    <h2>Wi-Fi</h2>
+    <div id="wifi-status" class="status-block"></div>
+    <div class="form-grid">
+      <label>SSID мережі
+        <div class="input-with-btn">
+          <input type="text" id="wifi-ssid" maxlength="32" placeholder="Оберіть зі списку або введіть вручну (напр. прихована мережа)">
+          <button type="button" id="btn-scan-wifi">Знайти мережі</button>
+        </div>
+      </label>
+      <label>Пароль
+        <div class="input-with-btn">
+          <input type="password" id="wifi-pass" maxlength="64">
+          <button type="button" id="btn-toggle-wifi-pass">Показати</button>
+        </div>
+      </label>
+    </div>
+    <button id="btn-save-wifi" class="primary">Підключити</button>
+    <span id="wifi-save-result" class="save-result"></span>
+
+    <div class="form-grid">
+      <label>Пароль власної точки доступу (AP), 8–63 символи
+        <div class="input-with-btn">
+          <input type="password" id="ap-pass" maxlength="63" autocomplete="new-password">
+          <button type="button" id="btn-toggle-ap-pass">Показати</button>
+        </div>
+      </label>
+    </div>
+    <p class="hint">Після зміни точка доступу перезапуститься: підключені до неї пристрої (зокрема цей браузер, якщо ви на AP) треба підключити заново з новим паролем. Скидання до заводських налаштувань повертає стандартний пароль.</p>
+    <button id="btn-save-ap" class="primary">Змінити пароль AP</button>
+    <span id="ap-save-result" class="save-result"></span>
+
+    <h2>Налаштування підключення до MQTT брокера</h2>
+    <div class="form-grid">
+      <label>URI (напр. mqtt://192.168.1.10:1883)
+        <input type="text" id="set-mqtt-uri" placeholder="mqtt://host:1883">
+      </label>
+      <label>Client ID
+        <input type="text" id="set-mqtt-client-id">
+      </label>
+      <label>Користувач
+        <input type="text" id="set-mqtt-user">
+      </label>
+      <label>Пароль
+        <input type="password" id="set-mqtt-pass">
+      </label>
+    </div>
+
+    <h2>Дата і час</h2>
+    <div id="time-status" class="status-block"></div>
+    <div class="form-grid">
+      <label>Встановити вручну
+        <input type="datetime-local" id="time-manual-input" step="1">
+      </label>
+    </div>
+    <button id="btn-set-time">Встановити вручну</button>
+    <span id="time-save-result" class="save-result"></span>
+
+    <h2>Збереження налаштувань</h2>
+    <p class="hint">Зберігає зміни в розділах «Вхідні тригери», «Налаштування входу AC» і «MQTT».</p>
+    <button id="btn-save-settings" class="primary">Зберегти налаштування</button>
+    <span id="settings-save-result" class="save-result"></span>
+
+    <h2>Оновлення прошивки</h2>
+    <div id="fw-info" class="status-block"></div>
+    <p class="hint">Оберіть файл прошивки і натисніть "Оновити прошивку". Налаштування та збережені пристрої зберігаються.</p>
+    <div class="form-grid">
+      <label>Файл прошивки (.bin)
+        <div class="input-with-btn">
+          <input type="file" id="fw-file" accept=".bin,application/octet-stream">
+          <button type="button" id="btn-fw-upload" class="primary">Оновити прошивку</button>
+        </div>
+      </label>
+    </div>
+    <progress id="fw-progress" class="hidden" max="100" value="0"></progress>
+    <span id="fw-result" class="save-result"></span>
+
+    <h2>Повне скидання пристрою</h2>
+    <p class="hint">Стирає розетки, налаштування, пароль Wi-Fi, пароль точки доступу та журнал і повертає пристрій до заводського стану (калібрування вольтметра зберігається). 
+      Після цього пристрій перезавантажиться і буде доступний лише через власну точку доступу налаштування.</p>
+    <button type="button" id="btn-factory-reset" class="danger">Скинути пристрій до заводських налаштувань</button>
+  </section>
+
+  <section id="tab-log" class="tab-content">
+    <div class="toolbar">
+      <span class="hint">Зберігаються останні 50 подій</span>
+      <button id="btn-refresh-log">Оновити</button>
+      <button id="btn-clear-log" class="danger">Очистити журнал</button>
+    </div>
+    <div class="log-list" id="log-tbody"></div>
+  </section>
+</main>
+
+<div id="plug-modal" class="modal hidden">
+  <div class="modal-box">
+    <h2 id="plug-modal-title">Новий пристрій</h2>
+    <form id="plug-form">
+      <input type="hidden" id="pf-id">
+      <label>Назва
+        <input type="text" id="pf-name" required maxlength="31">
+      </label>
+
+      <div class="form-row">
+        <label id="pf-enabled-row"><input type="checkbox" id="pf-enabled" checked> Увімкнена</label>
+        <label>Вхід
+          <select id="pf-input">
+            <option value="NONE">— (тільки вручну)</option>
+            <option value="AC1">AC1</option>
+            <option value="DC1">DC1</option>
+            <option value="DC2">DC2</option>
+          </select>
+        </label>
+        <label>
+          <input type="checkbox" id="pf-invert"> Інверсія</label>
+                  <label>Затримка увімкнення, с
+          <input type="number" id="pf-on-delay" min="0" max="600" step="1" value="0">
+        </label>
+      </div>
+      <p class="hint">Вимкнення - миттєво, увімкнення з затримкою (0–600 с). Може бути корисним для нестабільного входу. Інверсія входу враховується.</p>
+
+      <label>Драйвер / протокол
+        <select id="pf-driver">
+          <option value="http">HTTP</option>
+          <option value="http:shelly_gen1">Shelly (Gen1)</option>
+          <option value="http:shelly_gen2">Shelly (Gen2+/Gen3)</option>
+          <option value="http:tasmota">Tasmota</option>
+          <option value="mqtt">MQTT</option>
+        </select>
+      </label>
+
+      <fieldset id="pf-http-fields">
+        <legend>HTTP</legend>
+        <input type="hidden" id="pf-family" value="unknown">
+        <input type="hidden" id="pf-kind" value="unknown">
+        <div id="pf-http-host-field" class="hidden">
+          <label>IP або хост пристрою
+            <input type="text" id="pf-http-host" placeholder="192.168.1.50">
+          </label>
+        </div>
+        <div id="pf-http-manual-fields">
+          <label>URL для увімкнення
+            <input type="text" id="pf-http-on" placeholder="http://192.168.1.50/relay/0?turn=on">
+          </label>
+          <label>URL для вимкнення
+            <input type="text" id="pf-http-off" placeholder="http://192.168.1.50/relay/0?turn=off">
+          </label>
+          <label>URL статусу (опційно)
+            <input type="text" id="pf-http-status">
+          </label>
+          <div class="form-row">
+            <label><input type="checkbox" id="pf-http-post"> Використовувати POST замість GET</label>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Basic-auth логін <input type="text" id="pf-http-user"></label>
+          <label>Basic-auth пароль <input type="password" id="pf-http-pass"></label>
+        </div>
+      </fieldset>
+
+      <fieldset id="pf-mqtt-fields">
+        <legend>MQTT</legend>
+        <label>Топік команди
+          <input type="text" id="pf-mqtt-topic" placeholder="shellies/shelly1/relay/0/command">
+        </label>
+        <div class="form-row">
+          <label>Payload ON <input type="text" id="pf-mqtt-on" placeholder="on"></label>
+          <label>Payload OFF <input type="text" id="pf-mqtt-off" placeholder="off"></label>
+        </div>
+        <label>Топік стану (опційно)
+          <input type="text" id="pf-mqtt-state">
+        </label>
+        <div class="form-row">
+          <label>QoS
+            <select id="pf-mqtt-qos"><option value="0">0</option><option value="1">1</option><option value="2">2</option></select>
+          </label>
+          <label><input type="checkbox" id="pf-mqtt-retain"> Retain</label>
+        </div>
+      </fieldset>
+
+      <fieldset id="pf-zigbee-fields" class="disabled-fieldset">
+        <legend>Zigbee</legend>
+        <p class="hint">Драйвер зарезервований для майбутнього апаратного модуля (напр. ESP32-H2/C6 як координатор). Наразі команди повертатимуть помилку "not implemented".</p>
+      </fieldset>
+
+      <div class="form-actions">
+        <button type="submit" class="primary">Зберегти</button>
+        <button type="button" id="btn-cancel-plug">Скасувати</button>
+        <button type="button" id="btn-delete-plug" class="danger hidden">Видалити</button>
+      </div>
+      <div id="plug-form-error" class="error-text"></div>
+    </form>
+  </div>
+</div>
+
+<div id="scan-modal" class="modal hidden">
+  <div class="modal-box">
+    <h2>Пошук пристроїв у мережі</h2>
+    <div id="scan-status" class="status-block">Натисніть "Почати пошук"</div>
+    <table id="scan-table" class="table-plain">
+      <thead>
+        <tr><th>Пристрій</th><th>Тип</th><th>HTTP (:80)</th></tr>
+      </thead>
+      <tbody id="scan-tbody"></tbody>
+    </table>
+    <div class="form-actions">
+      <button id="btn-scan-go" class="primary">Почати пошук</button>
+      <button type="button" id="btn-scan-stop" disabled>Завершити пошук</button>
+      <button type="button" id="btn-scan-close">Закрити</button>
+    </div>
+  </div>
+</div>
+
+<div id="wifi-scan-modal" class="modal hidden">
+  <div class="modal-box">
+    <h2>Мережі Wi-Fi поруч</h2>
+    <div id="wifi-scan-status" class="status-block">Натисніть "Шукати"</div>
+    <table id="wifi-scan-table" class="table-plain">
+      <thead>
+        <tr><th>Мережа</th><th></th></tr>
+      </thead>
+      <tbody id="wifi-scan-tbody"></tbody>
+    </table>
+    <div class="form-actions">
+      <button id="btn-wifi-scan-go" class="primary">Почати пошук</button>
+      <button type="button" id="btn-wifi-scan-close">Закрити</button>
+    </div>
+  </div>
+</div>
+
+<div id="reset-modal" class="modal hidden">
+  <div class="modal-box">
+    <h2>Скинути пристрій до заводських налаштувань?</h2>
+    <p class="hint">Це незворотно видалить усі розетки, системні налаштування, збережений пароль Wi-Fi, пароль точки доступу та журнал подій (калібрування вольтметра збережеться). Пристрій перезавантажиться і буде доступний лише через точку доступу налаштування, як одразу після першого ввімкнення.</p>
+    <div class="form-actions">
+      <button type="button" id="btn-reset-cancel">Скасувати</button>
+      <button type="button" id="btn-reset-confirm" class="danger">Стерти</button>
+    </div>
+    <div id="reset-modal-result" class="save-result"></div>
+  </div>
+</div>
+
+<div id="toast-stack" class="toast-stack"></div>
+
+<script src="mock.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
