@@ -20,127 +20,79 @@
         <p class="lead">Схема підключення</p>
 
         <figure>
-            <div class="tscroll">
-                <svg viewBox="0 0 760 452" role="img" aria-labelledby="wiring-t wiring-d"
-                     xmlns="http://www.w3.org/2000/svg">
-                    <title id="wiring-t">Схема підключення Smart Plug Control HW 1.1</title>
-                    <desc id="wiring-d">Живлення 100–240 В змінного струму, вхід вимірювання мережі AC1 15–300 В через
-                        ZMPT101B на GPIO10 (АЦП1), входи DC1 і DC2 5–24 В через оптрони на GPIO7 і GPIO2, світлодіод на
-                        GPIO12, Wi-Fi до роутера й телефона.
-                    </desc>
-                    <defs>
-                        <marker id="dg-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7"
-                                orient="auto">
-                            <path d="M0 0L8 4L0 8z" style="fill:var(--muted)"/>
-                        </marker>
-                    </defs>
+<div class="tscroll">
+<svg viewBox="0 0 760 484" role="img" aria-labelledby="wiring-t wiring-d" xmlns="http://www.w3.org/2000/svg">
+  <title id="wiring-t">Схема підключення Smart Plug Control HW 1.1</title>
+  <desc id="wiring-d">Клеми живлення L і N підключені через автомат до резервованого живлення (ДБЖ, інвертор або АВР). Клеми AC1 L і N підключені через автомат до напруги, яку потрібно вимірювати. Клеми DC1 і DC2 не підключені. Хаб керує розетками по Wi-Fi.</desc>
 
-                    <rect class="dg-board" x="215" y="12" width="365" height="400" rx="10"/>
-                    <text class="dg-txt dg-b" x="397" y="33" text-anchor="middle">Плата Smart Plug Control · HW 1.1
-                    </text>
+  <!-- джерела -->
+  <rect class="dg-box dg-hv" x="10" y="62" width="185" height="72" rx="6"/>
+  <text class="dg-txt dg-b" x="20" y="86">Резервоване живлення</text>
+  <text class="dg-sub" x="20" y="104">ДБЖ / інвертор / АВР</text>
+  <text class="dg-sub" x="20" y="121">~230 В</text>
 
-                    <!-- зовнішні клеми -->
-                    <rect class="dg-box dg-hv" x="10" y="40" width="170" height="64" rx="6"/>
-                    <text class="dg-txt dg-b" x="20" y="60">Живлення</text>
-                    <text class="dg-sub" x="20" y="77">100–240 В~, до 0,2 А</text>
-                    <text class="dg-sub" x="20" y="94">клеми L, N</text>
+  <rect class="dg-box dg-hv" x="10" y="168" width="185" height="72" rx="6"/>
+  <text class="dg-txt dg-b" x="20" y="192">Контрольована напруга</text>
+  <text class="dg-sub" x="20" y="210">мережа, яку треба</text>
+  <text class="dg-sub" x="20" y="227">вимірювати, ~230 В</text>
 
-                    <rect class="dg-box dg-hv" x="10" y="140" width="170" height="64" rx="6"/>
-                    <text class="dg-txt dg-b" x="20" y="160">Вхід AC1 (вимірювання)</text>
-                    <text class="dg-sub" x="20" y="177">15–300 В~, точність 1 %</text>
-                    <text class="dg-sub" x="20" y="194">клеми L, N</text>
+  <!-- проводи живлення -->
+  <path class="dg-l" d="M195 84H420"/>
+  <path class="dg-n" d="M195 110H420"/>
+  <rect class="dg-qf" x="250" y="77" width="44" height="14" rx="2"/>
+  <text class="dg-sub" x="272" y="70" text-anchor="middle">QF1</text>
+  <text class="dg-sub" x="203" y="79">L</text>
+  <text class="dg-sub" x="203" y="105">N</text>
 
-                    <rect class="dg-box" x="10" y="235" width="170" height="56" rx="6"/>
-                    <text class="dg-txt dg-b" x="20" y="256">Вхід DC1</text>
-                    <text class="dg-sub" x="20" y="274">5–24 В=</text>
+  <!-- проводи AC1 -->
+  <path class="dg-l" d="M195 190H420"/>
+  <path class="dg-n" d="M195 216H420"/>
+  <rect class="dg-qf" x="250" y="183" width="44" height="14" rx="2"/>
+  <text class="dg-sub" x="272" y="176" text-anchor="middle">QF2</text>
+  <text class="dg-sub" x="203" y="185">L</text>
+  <text class="dg-sub" x="203" y="211">N</text>
 
-                    <rect class="dg-box" x="10" y="315" width="170" height="56" rx="6"/>
-                    <text class="dg-txt dg-b" x="20" y="336">Вхід DC2</text>
-                    <text class="dg-sub" x="20" y="354">5–24 В=</text>
+  <!-- пристрій -->
+  <rect class="dg-mcu" x="420" y="20" width="190" height="424" rx="8"/>
+  <text class="dg-txt dg-b" x="515" y="40" text-anchor="middle">Smart Plug Control</text>
+  <text class="dg-sub" x="515" y="55" text-anchor="middle">HW 1.1</text>
 
-                    <!-- проводи до вузлів плати -->
-                    <path class="dg-wire hv" d="M180 72H238"/>
-                    <path class="dg-wire hv" d="M180 172H238"/>
-                    <path class="dg-wire" d="M180 263H238"/>
-                    <path class="dg-wire" d="M180 343H238"/>
+  <text class="dg-sub dg-b" x="436" y="73">Живлення ~ 100–240 В</text>
+  <circle class="dg-term on" cx="420" cy="84" r="4.5"/>
+  <text class="dg-txt" x="436" y="88">L</text>
+  <circle class="dg-term on" cx="420" cy="110" r="4.5"/>
+  <text class="dg-txt" x="436" y="114">N</text>
 
-                    <!-- вузли плати -->
-                    <rect class="dg-box dg-hv" x="240" y="44" width="150" height="56" rx="6"/>
-                    <text class="dg-txt dg-b" x="250" y="68">Блок живлення</text>
-                    <text class="dg-sub" x="250" y="86">AC→DC, ізольований</text>
+  <text class="dg-sub dg-b" x="436" y="179">Вхід AC1 ~ 15–300 В</text>
+  <circle class="dg-term on" cx="420" cy="190" r="4.5"/>
+  <text class="dg-txt" x="436" y="194">L</text>
+  <circle class="dg-term on" cx="420" cy="216" r="4.5"/>
+  <text class="dg-txt" x="436" y="220">N</text>
 
-                    <rect class="dg-box dg-hv" x="240" y="144" width="150" height="56" rx="6"/>
-                    <text class="dg-txt dg-b" x="250" y="168">Датчик ZMPT101B</text>
-                    <text class="dg-sub" x="250" y="186">гальванічна розв'язка</text>
+  <text class="dg-sub dg-b" x="436" y="284">Вхід DC1 = 5–24 В</text>
+  <circle class="dg-term" cx="420" cy="298" r="4.5"/>
+  <text class="dg-txt" x="436" y="302">+</text>
+  <circle class="dg-term" cx="420" cy="322" r="4.5"/>
+  <text class="dg-txt" x="436" y="326">−</text>
 
-                    <rect class="dg-box" x="240" y="235" width="150" height="56" rx="6"/>
-                    <text class="dg-txt dg-b" x="250" y="259">Оптрон</text>
-                    <text class="dg-sub" x="250" y="277">розв'язка входу DC1</text>
+  <text class="dg-sub dg-b" x="436" y="368">Вхід DC2 = 5–24 В</text>
+  <circle class="dg-term" cx="420" cy="382" r="4.5"/>
+  <text class="dg-txt" x="436" y="386">+</text>
+  <circle class="dg-term" cx="420" cy="406" r="4.5"/>
+  <text class="dg-txt" x="436" y="410">−</text>
 
-                    <rect class="dg-box" x="240" y="315" width="150" height="56" rx="6"/>
-                    <text class="dg-txt dg-b" x="250" y="339">Оптрон</text>
-                    <text class="dg-sub" x="250" y="357">розв'язка входу DC2</text>
 
-                    <!-- до контролера -->
-                    <path class="dg-wire" d="M390 72H438"/>
-                    <path class="dg-wire" d="M390 172H438"/>
-                    <path class="dg-wire" d="M390 263H438"/>
-                    <path class="dg-wire" d="M390 343H438"/>
+  <!-- керування розетками -->
+  <path class="dg-open" d="M610 250H640"/>
+  <rect class="dg-box" x="642" y="218" width="108" height="64" rx="6"/>
+  <text class="dg-txt dg-b" x="652" y="242">Розетки</text>
+  <text class="dg-sub" x="652" y="260">керування</text>
+  <text class="dg-sub" x="652" y="275">по Wi-Fi</text>
 
-                    <rect class="dg-mcu" x="440" y="44" width="120" height="320" rx="8"/>
-                    <text class="dg-txt dg-b" x="500" y="205" text-anchor="middle">ESP32-S3</text>
-                    <text class="dg-sub" x="500" y="222" text-anchor="middle">WROOM-1 · 16 МБ</text>
-                    <text class="dg-sub" x="448" y="76">+3,3 В</text>
-                    <text class="dg-sub" x="448" y="176">GPIO10</text>
-                    <text class="dg-sub" x="448" y="267">GPIO7</text>
-                    <text class="dg-sub" x="448" y="347">GPIO2</text>
-                    <text class="dg-sub" x="552" y="100" text-anchor="end">GPIO12</text>
-                    <text class="dg-sub" x="552" y="184" text-anchor="end">Wi-Fi AP</text>
-                    <text class="dg-sub" x="552" y="254" text-anchor="end">Wi-Fi STA</text>
-
-                    <!-- вихідні зв'язки -->
-                    <path class="dg-wire" d="M560 96H624"/>
-                    <circle class="dg-led" cx="640" cy="96" r="9"/>
-                    <text class="dg-sub" x="640" y="122" text-anchor="middle">світлодіод</text>
-                    <text class="dg-sub" x="640" y="136" text-anchor="middle">1 раз/с</text>
-
-                    <path class="dg-wire dash" d="M560 180H618"/>
-                    <rect class="dg-box" x="620" y="160" width="125" height="40" rx="6"/>
-                    <text class="dg-txt dg-b" x="630" y="178">Телефон / ПК</text>
-                    <text class="dg-sub" x="630" y="193">192.168.4.1</text>
-
-                    <path class="dg-wire" d="M560 250H618"/>
-                    <rect class="dg-box" x="620" y="222" width="125" height="56" rx="6"/>
-                    <text class="dg-txt dg-b" x="630" y="246">Роутер</text>
-                    <text class="dg-sub" x="630" y="264">2,4 ГГц</text>
-
-                    <path class="dg-wire" d="M682 278V318"/>
-                    <rect class="dg-box" x="620" y="320" width="125" height="56" rx="6"/>
-                    <text class="dg-txt dg-b" x="630" y="344">Розетки</text>
-                    <text class="dg-sub" x="630" y="362">Shelly, Tasmota, MQTT</text>
-
-                    <!-- легенда -->
-                    <rect class="dg-box dg-hv" x="10" y="424" width="22" height="14" rx="3"/>
-                    <text class="dg-sub" x="40" y="436">мережева напруга, небезпечно</text>
-                    <rect class="dg-box" x="270" y="424" width="22" height="14" rx="3"/>
-                    <text class="dg-sub" x="300" y="436">низька напруга</text>
-                </svg>
-            </div>
-            <figcaption>Схема підключення (вигляд ззовні). Назви клем на платі можуть відрізнятися.</figcaption>
-        </figure>
-
-        <div class="callout note">
-            <span class="t">Піни не змінюються з веб-інтерфейсу</span>
-            Номери пінів зашиті під час збирання прошивки. У вебі можна лише вмикати й вимикати «прослуховування» входу.
-            Щоб змінити піни, треба перезібрати й перепрошити пристрій через <code>idf.py menuconfig</code> (розділ
-            «Smart Plug Control»).
-        </div>
-
-        <div class="callout warn">
-            <span class="t">AC1 тільки на GPIO1–10</span>
-            АЦП в безперервному режимі на ESP32-S3 працює лише з ADC1, тобто GPIO1–10. Якщо на вашій платі вихід
-            ZMPT101B розведено на GPIO11 (це вже ADC2), з'єднайте GPIO11 перемичкою з GPIO10.
-        </div>
+</svg>
+</div>
+<figcaption>Схема підключення. Живлення: від резервованої лінії (ДБЖ, інвертор, АВР). AC1: до напруги, яку треба вимірювати. DC1 і DC2: не підключати. Назви клем на платі можуть відрізнятися.</figcaption>
+</figure>
 
         <h2 id="inputs">Як працюють входи</h2>
 
