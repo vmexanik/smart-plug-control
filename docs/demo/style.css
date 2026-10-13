@@ -56,6 +56,20 @@ header {
   gap: 0.5rem;
 }
 
+.brand {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+}
+
+.doc-link {
+  font-size: 0.8125rem;
+  color: var(--bs-blue);
+  text-decoration: none;
+}
+.doc-link:hover { text-decoration: underline; }
+
 header h1 {
   font-size: 1.15rem;
   font-weight: 600;

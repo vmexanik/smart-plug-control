@@ -1,91 +1,161 @@
 <!doctype html>
 <html lang="uk">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Розетки та протоколи — Smart Plug Control</title>
-<meta name="description" content="Які розетки підтримує Smart Plug Control: Shelly, Tasmota, ESPHome, довільний HTTP, MQTT. Що не підтримується.">
-<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
-<link rel="stylesheet" href="assets/site.css">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Розетки та протоколи — Smart Plug Control</title>
+    <meta name="description"
+          content="Які розетки підтримує Smart Plug Control: Shelly, Tasmota, ESPHome, довільний HTTP, MQTT. Що не підтримується.">
+    <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+    <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
 <a class="skip" href="#main">До змісту</a>
 <div class="shell">
-<aside class="side" id="side"><noscript><a href="index.html">Огляд</a></noscript></aside>
-<main id="main">
+    <aside class="side" id="side">
+        <noscript><a href="index.html">Огляд</a></noscript>
+    </aside>
+    <main id="main">
 
-<h1>Розетки та протоколи</h1>
-<p class="lead">Хаб не вбудований у розетку, він керує нею по мережі. Тут перелік того, що підтримується, і як налаштувати кожен тип.</p>
+        <h1>Розетки та протоколи</h1>
+        <p class="lead">Тут перелік того, що підтримується, і як
+            налаштувати кожен тип.</p>
 
-<h2 id="matrix">Що підтримується</h2>
-<div class="tscroll"><table>
-  <tr><th>Тип</th><th>Автопошук</th><th>Стан при додаванні</th><th>Потужність</th></tr>
-  <tr><td><strong>Shelly Gen1</strong> (Plug, Plug S, Shelly 1…)</td><td><span class="pill on">так</span></td><td><span class="pill on">так</span></td><td>потужність (Plug / Plug S)</td></tr>
-  <tr><td><strong>Shelly Gen2 / Gen3</strong> (Plus, Pro…)</td><td><span class="pill on">так</span></td><td><span class="pill on">так</span></td><td>потужність, напруга, струм</td></tr>
-  <tr><td><strong>Tasmota</strong></td><td><span class="pill on">так</span></td><td><span class="pill on">так</span></td><td>де є енергомонітор (Sonoff S31, POWR3…)</td></tr>
-  <tr><td><strong>ESPHome</strong></td><td><span class="pill warn">частково</span></td><td><span class="pill off">ні</span></td><td><span class="pill off">ні</span></td></tr>
-  <tr><td><strong>Довільний HTTP</strong></td><td><span class="pill off">ні</span></td><td><span class="pill off">ні</span></td><td><span class="pill off">ні</span></td></tr>
-  <tr><td><strong>MQTT</strong></td><td><span class="pill off">ні</span></td><td><span class="pill off">ні</span></td><td><span class="pill off">ні</span></td></tr>
-  <tr><td>Tuya / Smart Life</td><td colspan="3"><span class="pill no">не підтримується</span> (свідоме рішення проєкту)</td></tr>
-  <tr><td>Xiaomi / Mi Home</td><td colspan="3"><span class="pill no">напряму не підключається</span></td></tr>
-  <tr><td>Zigbee</td><td colspan="3"><span class="pill warn">заготовка</span> пункт у списку є, але команди повертають помилку: у ESP32-S3 немає радіо 802.15.4</td></tr>
-</table></div>
+        <h2 id="matrix">Що підтримується</h2>
+        <div class="tscroll">
+            <table>
+                <tr>
+                    <th>Тип</th>
+                    <th>Автопошук</th>
+                    <th>Стан при додаванні</th>
+                    <th>Додаткові параметри відображення</th>
+                </tr>
+                <tr>
+                    <td><strong>Shelly Gen1</strong> (Plug, Plug S, Shelly 1…)</td>
+                    <td><span class="pill on">так</span></td>
+                    <td><span class="pill on">так</span></td>
+                    <td>потужність (Plug / Plug S)</td>
+                </tr>
+                <tr>
+                    <td><strong>Shelly Gen2 / Gen3</strong> (Plus, Pro…)</td>
+                    <td><span class="pill on">так</span></td>
+                    <td><span class="pill on">так</span></td>
+                    <td>потужність, напруга, струм</td>
+                </tr>
+                <tr>
+                    <td><strong>Tasmota</strong></td>
+                    <td><span class="pill on">так</span></td>
+                    <td><span class="pill on">так</span></td>
+                    <td>де є енергомонітор (Sonoff S31, POWR3…)</td>
+                </tr>
+                <tr>
+                    <td><strong>ESPHome</strong></td>
+                    <td><span class="pill warn">частково</span></td>
+                    <td><span class="pill off">ні</span></td>
+                    <td><span class="pill off">ні</span></td>
+                </tr>
+                <tr>
+                    <td><strong>Довільний HTTP</strong></td>
+                    <td><span class="pill off">ні</span></td>
+                    <td><span class="pill off">ні</span></td>
+                    <td><span class="pill off">ні</span></td>
+                </tr>
+                <tr>
+                    <td><strong>MQTT</strong></td>
+                    <td><span class="pill off">ні</span></td>
+                    <td><span class="pill off">ні</span></td>
+                    <td><span class="pill off">ні</span></td>
+                </tr>
+            </table>
+        </div>
 
-<h2 id="shelly">Shelly і Tasmota</h2>
-<p>Найпростіший шлях. У формі розетки оберіть <strong>Shelly (Gen1)</strong>, <strong>Shelly (Gen2+/Gen3)</strong> або <strong>Tasmota</strong> і введіть IP-адресу. Адреси команд хаб складе сам. Або скористайтеся <a href="interface.html#scan">автопошуком</a>, і форма заповниться сама.</p>
-<ul>
-  <li>Задайте пристрою <strong>постійну IP-адресу</strong> (резервування DHCP на роутері). Якщо IP зміниться, розетка стане «не на зв'язку» й доведеться оновити адресу в її формі.</li>
-  <li>Якщо на пристрої увімкнено пароль, його видно в пошуку як «(потрібен пароль)». Логін і пароль Basic-авторизації вводяться у формі розетки.</li>
-  <li>Для Shelly і Tasmota хаб показує споживання, якщо розетка його вимірює.</li>
-</ul>
+        <h2 id="shelly">Shelly і Tasmota</h2>
+        <p>Найкраще рішення. У формі розетки оберіть <strong>Shelly (Gen1)</strong>, <strong>Shelly
+            (Gen2+/Gen3)</strong> або <strong>Tasmota</strong> і введіть IP-адресу. Протокол роботи вже реалізований. Або
+            скористайтеся <a href="interface.html#scan">автопошуком</a>, і форма заповниться сама.</p>
+        <ul>
+            <li>Якщо на пристрої увімкнено пароль, його видно в пошуку як «(потрібен пароль)». Логін і пароль
+                Basic-авторизації вводяться у формі розетки.
+            </li>
+            <li>Для Shelly і Tasmota хаб показує споживання, якщо розетка його вимірює.</li>
+        </ul>
 
-<h3>Які команди надсилає хаб</h3>
-<p>Корисно знати, якщо розетку треба перевірити вручну чи налаштувати файрвол.</p>
-<div class="tscroll"><table>
-  <tr><th>Тип</th><th>Увімкнути</th></tr>
-  <tr><td>Shelly Gen1</td><td><code>GET /relay/0?turn=on</code></td></tr>
-  <tr><td>Shelly Gen2+</td><td><code>GET /rpc/Switch.Set?id=0&amp;on=true</code></td></tr>
-  <tr><td>Tasmota</td><td><code>GET /cm?cmnd=Power1%20On</code></td></tr>
-  <tr><td>ESPHome</td><td><code>POST /switch/&lt;id&gt;/turn_on</code></td></tr>
-</table></div>
-<p>Вимикання відрізняється останнім словом (<code>off</code> / <code>false</code> / <code>Off</code> / <code>turn_off</code>).</p>
+        <h3>Які команди надсилає хаб</h3>
+        <p>Корисно знати, якщо розетку треба перевірити вручну чи налаштувати файрвол.</p>
+        <div class="tscroll">
+            <table>
+                <tr>
+                    <th>Тип</th>
+                    <th>Увімкнути</th>
+                </tr>
+                <tr>
+                    <td>Shelly Gen1</td>
+                    <td><code>GET /relay/0?turn=on</code></td>
+                </tr>
+                <tr>
+                    <td>Shelly Gen2+</td>
+                    <td><code>GET /rpc/Switch.Set?id=0&amp;on=true</code></td>
+                </tr>
+                <tr>
+                    <td>Tasmota</td>
+                    <td><code>GET /cm?cmnd=Power1%20On</code></td>
+                </tr>
+                <tr>
+                    <td>ESPHome</td>
+                    <td><code>POST /switch/&lt;id&gt;/turn_on</code></td>
+                </tr>
+            </table>
+        </div>
+        <p>Вимикання відрізняється останнім словом (<code>off</code> / <code>false</code> / <code>Off</code> / <code>turn_off</code>).
+        </p>
 
-<div class="callout warn">
-  <span class="t">Лише перший канал</span>
-  Автоматично підставляється керування першим каналом (Shelly <code>id=0</code>, Tasmota <code>Power1</code>). Багатоканальні пристрої (подовжувачі, багатоканальні реле) в пошуку позначені як «реле», а адреси для каналів 2+ потрібно вказати вручну в режимі «HTTP».
-</div>
+        <div class="callout warn">
+            <span class="t">Лише перший канал</span>
+            Автоматично підставляється керування першим каналом (Shelly <code>id=0</code>, Tasmota <code>Power1</code>).
+            Багатоканальні пристрої (подовжувачі, багатоканальні реле) в пошуку позначені як «реле», а адреси для
+            каналів 2+ потрібно вказати вручну в режимі «HTTP».
+        </div>
 
-<h2 id="http">Довільний HTTP</h2>
-<p>Підійде будь-який пристрій, який вмикається звичайним HTTP-запитом:</p>
-<ul>
-  <li><strong>URL для увімкнення</strong> і <strong>URL для вимкнення</strong>: повні адреси, наприклад <code>http://192.168.1.50/relay/0?turn=on</code>.</li>
-  <li>Прапорець <em>POST замість GET</em>: для пристроїв, яким потрібен POST.</li>
-  <li>Логін і пароль: якщо пристрій вимагає Basic-авторизацію.</li>
-  <li>Поле «URL статусу» зараз зберігається, але хаб ним не користується.</li>
-</ul>
-<p>Підтримується лише <code>http://</code>, без шифрування.</p>
+        <h2 id="http">Довільний HTTP</h2>
+        <p>Підійде будь-який пристрій, який вмикається звичайним HTTP-запитом:</p>
+        <ul>
+            <li><strong>URL для увімкнення</strong> і <strong>URL для вимкнення</strong>: повні адреси, наприклад <code>http://192.168.1.50/relay/0?turn=on</code>.
+            </li>
+            <li>Прапорець <em>POST замість GET</em>: для пристроїв, яким потрібен POST.</li>
+            <li>Логін і пароль: якщо пристрій вимагає Basic-авторизацію.</li>
+        </ul>
+        <p>Підтримується лише <code>http://</code>, без шифрування.</p>
 
-<h2 id="mqtt">MQTT</h2>
-<ol class="steps">
-  <li><strong>Задайте брокера</strong>
-    Вкладка «Системні налаштування», розділ MQTT: URI (<code>mqtt://192.168.1.10:1883</code>), за потреби користувач і пароль, потім «Зберегти налаштування».</li>
-  <li><strong>Додайте розетку з драйвером MQTT</strong>
-    Вкажіть топік команди (наприклад <code>shellies/shelly1/relay/0/command</code>) та тексти ON/OFF (<code>on</code> / <code>off</code>).</li>
-  <li><strong>Оберіть QoS і Retain</strong>
-    Для більшості випадків QoS 0 без Retain. Retain корисний, якщо пристрій має підхопити останню команду після перепідключення до брокера.</li>
-</ol>
-<p>Хаб лише <strong>публікує</strong> команди. Стан розетки він із MQTT не читає, тому в таких розеток немає опитування стану та показів потужності.</p>
+        <h2 id="mqtt">MQTT</h2>
+        <ol class="steps">
+            <li><strong>Задайте брокера</strong>
+                Вкладка «Системні налаштування», розділ MQTT: URI (<code>mqtt://192.168.1.10:1883</code>), за потреби
+                користувач і пароль, потім «Зберегти налаштування».
+            </li>
+            <li><strong>Додайте розетку з драйвером MQTT</strong>
+                Вкажіть топік команди (наприклад <code>shellies/shelly1/relay/0/command</code>) та тексти ON/OFF (<code>on</code>
+                / <code>off</code>).
+            </li>
+            <li><strong>Оберіть QoS і Retain</strong>
+                Для більшості випадків QoS 0 без Retain. Retain корисний, якщо пристрій має підхопити останню команду
+                після перепідключення до брокера.
+            </li>
+        </ol>
+        <p>Хаб лише <strong>публікує</strong> команди. Стан розетки він із MQTT не читає, тому в таких розеток немає
+            опитування стану та показів потужності.</p>
 
-<h2 id="offline">Коли розетка недоступна</h2>
-<p>Для розеток з розпізнаним типом (Shelly, Tasmota) хаб раз на 10 с перевіряє, чи вони «на зв'язку». Якщо ні:</p>
-<ul>
-  <li>на картці з'являється «(не на зв'язку)», кнопка сіріє;</li>
-  <li>команди одразу відхиляються, а не чекають довгого таймауту;</li>
-  <li>коли пристрій з'явиться знову, хаб сам перечитає його справжній стан (наприклад, якщо хтось натиснув кнопку на корпусі) і запише це в журнал.</li>
-</ul>
-<p>Для довільного HTTP та MQTT такого опитування немає, тому вони вважаються доступними завжди.</p>
+        <h2 id="offline">Коли розетка недоступна</h2>
+        <p>Для розеток з розпізнаним типом (Shelly, Tasmota) хаб раз на 10 с перевіряє, чи вони «на зв'язку». Якщо
+            ні:</p>
+        <ul>
+            <li>на картці з'являється «(не на зв'язку)», кнопка стає сірою;</li>
+            <li>коли пристрій з'явиться знову, хаб оновить його справжній стан (наприклад, якщо хтось натиснув
+                кнопку на корпусі) і запише це в журнал.
+            </li>
+        </ul>
+        <p>Для довільного HTTP та MQTT такого опитування немає, тому вони вважаються доступними завжди.</p>
 
-</main>
+    </main>
 </div>
 <script src="assets/site.js"></script>
 </body>

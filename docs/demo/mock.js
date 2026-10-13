@@ -324,7 +324,7 @@
     if (path === '/api/log/clear' && method === 'POST') { state.log = []; return { ok: true }; }
 
     if (path === '/api/system/ota' && method === 'GET') {
-      return { project: 'smart_plug_control', version: '2.1.2 (демо)', built: 'Oct 10 2026', max_size: 4194304 };
+      return { project: 'smart_plug_control', version: '2.1.2 (демо)', hw_version: '1.1', built: 'Oct 10 2026', max_size: 4194304 };
     }
     if (path === '/api/system/restart' && method === 'POST') return { ok: true };
     if (path === '/api/system/factory_reset' && method === 'POST') {

@@ -21,6 +21,7 @@
 #include "led_status.h"
 #include "captive_dns.h"
 #include "ac_monitor.h"
+#include "hw_version.h"
 
 static const char *TAG = "app_main";
 
@@ -124,6 +125,7 @@ void app_main(void)
     if (reset_abnormal) {
         ESP_LOGW(TAG, "previous reset was abnormal: %s", reset_str);
     }
+    ESP_LOGI(TAG, "Firmware built for hardware revision %s", hw_version_str());
     BOOT_WDT_STEP();
 
     /* Netif/event-loop plumbing only (cheap) -- the memory-heavy Wi-Fi

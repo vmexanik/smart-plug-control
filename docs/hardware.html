@@ -1,93 +1,192 @@
 <!doctype html>
 <html lang="uk">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Підключення — Smart Plug Control</title>
-<meta name="description" content="Піни ESP32-S3, входи AC1, DC1, DC2, модуль ZMPT101B, логіка керування розетками.">
-<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
-<link rel="stylesheet" href="assets/site.css">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Підключення — Smart Plug Control</title>
+    <meta name="description" content="Піни ESP32-S3, входи AC1, DC1, DC2, модуль ZMPT101B, логіка керування розетками.">
+    <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+    <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
 <a class="skip" href="#main">До змісту</a>
 <div class="shell">
-<aside class="side" id="side"><noscript><a href="index.html">Огляд</a></noscript></aside>
-<main id="main">
+    <aside class="side" id="side">
+        <noscript><a href="index.html">Огляд</a></noscript>
+    </aside>
+    <main id="main">
 
-<h1>Підключення</h1>
-<p class="lead">Які піни за що відповідають, як підключати входи AC1, DC1, DC2 і за яким правилом вхід керує розеткою.</p>
+        <h1>Підключення</h1>
+        <p class="lead">Схема підключення</p>
 
-<div class="callout danger">
-  <span class="t">Небезпечна напруга</span>
-  Модуль ZMPT101B підключається до мережі 230 В. Усі роботи з мережею виконуйте при вимкненому живленні, лише кваліфікованою людиною, і з надійною ізоляцією. Низьковольтна частина (ESP32) не повинна мати гальванічного зв'язку з мережею. Якщо ви не впевнені, не підключайте пристрій самі.
-</div>
+        <figure>
+            <div class="tscroll">
+                <svg viewBox="0 0 760 452" role="img" aria-labelledby="wiring-t wiring-d"
+                     xmlns="http://www.w3.org/2000/svg">
+                    <title id="wiring-t">Схема підключення Smart Plug Control HW 1.1</title>
+                    <desc id="wiring-d">Живлення 100–240 В змінного струму, вхід вимірювання мережі AC1 15–300 В через
+                        ZMPT101B на GPIO10 (АЦП1), входи DC1 і DC2 5–24 В через оптрони на GPIO7 і GPIO2, світлодіод на
+                        GPIO12, Wi-Fi до роутера й телефона.
+                    </desc>
+                    <defs>
+                        <marker id="dg-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7"
+                                orient="auto">
+                            <path d="M0 0L8 4L0 8z" style="fill:var(--muted)"/>
+                        </marker>
+                    </defs>
 
-<h2 id="pins">Піни за замовчуванням</h2>
-<div class="tscroll"><table>
-  <tr><th>Сигнал</th><th>GPIO</th><th>Примітка</th></tr>
-  <tr><td><strong>DC1</strong></td><td>GPIO7</td><td>Дискретний вхід</td></tr>
-  <tr><td><strong>DC2</strong></td><td>GPIO2</td><td>Дискретний вхід</td></tr>
-  <tr><td><strong>AC1</strong> (вихід ZMPT101B)</td><td>GPIO10</td><td>Аналоговий вхід АЦП1. Окремої цифрової лінії для AC1 немає</td></tr>
-  <tr><td>Світлодіод стану</td><td>GPIO12</td><td>Блимає раз на секунду, поки прошивка працює</td></tr>
-</table></div>
+                    <rect class="dg-board" x="215" y="12" width="365" height="400" rx="10"/>
+                    <text class="dg-txt dg-b" x="397" y="33" text-anchor="middle">Плата Smart Plug Control · HW 1.1
+                    </text>
 
-<div class="callout note">
-  <span class="t">Піни не змінюються з веб-інтерфейсу</span>
-  Номери пінів зашиті під час збирання прошивки. У вебі можна лише вмикати й вимикати «прослуховування» входу. Щоб змінити піни, треба перезібрати й перепрошити пристрій через <code>idf.py menuconfig</code> (розділ «Smart Plug Control»).
-</div>
+                    <!-- зовнішні клеми -->
+                    <rect class="dg-box dg-hv" x="10" y="40" width="170" height="64" rx="6"/>
+                    <text class="dg-txt dg-b" x="20" y="60">Живлення</text>
+                    <text class="dg-sub" x="20" y="77">100–240 В~, до 0,2 А</text>
+                    <text class="dg-sub" x="20" y="94">клеми L, N</text>
 
-<div class="callout warn">
-  <span class="t">AC1 тільки на GPIO1–10</span>
-  АЦП в безперервному режимі на ESP32-S3 працює лише з ADC1, тобто GPIO1–10. Якщо на вашій платі вихід ZMPT101B розведено на GPIO11 (це вже ADC2), з'єднайте GPIO11 перемичкою з GPIO10.
-</div>
+                    <rect class="dg-box dg-hv" x="10" y="140" width="170" height="64" rx="6"/>
+                    <text class="dg-txt dg-b" x="20" y="160">Вхід AC1 (вимірювання)</text>
+                    <text class="dg-sub" x="20" y="177">15–300 В~, точність 1 %</text>
+                    <text class="dg-sub" x="20" y="194">клеми L, N</text>
 
-<h2 id="inputs">Як працюють входи</h2>
+                    <rect class="dg-box" x="10" y="235" width="170" height="56" rx="6"/>
+                    <text class="dg-txt dg-b" x="20" y="256">Вхід DC1</text>
+                    <text class="dg-sub" x="20" y="274">5–24 В=</text>
 
-<h3>DC1 і DC2</h3>
-<p>Входи в прошивці <strong>інвертовані</strong>: <em>низький рівень на піні означає «сигнал є»</em> (вхід активний). Це звичний варіант для підключення через оптрон або «сухий контакт» на землю. Внутрішню підтяжку прошивка <strong>не вмикає</strong>, тому підтяжка до +3,3 В має бути на самій платі.</p>
+                    <rect class="dg-box" x="10" y="315" width="170" height="56" rx="6"/>
+                    <text class="dg-txt dg-b" x="20" y="336">Вхід DC2</text>
+                    <text class="dg-sub" x="20" y="354">5–24 В=</text>
 
-<table>
-  <tr><th>Рівень на піні</th><th>Вхід вважається</th><th>Розетка (без інверсії)</th></tr>
-  <tr><td>LOW (0 В)</td><td><span class="pill on">активний</span></td><td>вмикається</td></tr>
-  <tr><td>HIGH (3,3 В)</td><td><span class="pill off">неактивний</span></td><td>вимикається</td></tr>
-</table>
+                    <!-- проводи до вузлів плати -->
+                    <path class="dg-wire hv" d="M180 72H238"/>
+                    <path class="dg-wire hv" d="M180 172H238"/>
+                    <path class="dg-wire" d="M180 263H238"/>
+                    <path class="dg-wire" d="M180 343H238"/>
 
-<h3>AC1</h3>
-<p>AC1 не має власного піна. Це «віртуальний» вхід, який керується вимірюванням напруги й частоти мережі. Він <span class="pill on">активний</span>, коли напруга й частота одночасно в межах, заданих у налаштуваннях. Він <span class="pill off">неактивний</span>, коли напруга чи частота поза межами <strong>або мережі немає взагалі</strong> (0 В вважається «поза межами»).</p>
-<p>Вимірювання, межі й калібрування описані на сторінці <a href="ac.html">Напруга мережі (AC1)</a>.</p>
+                    <!-- вузли плати -->
+                    <rect class="dg-box dg-hv" x="240" y="44" width="150" height="56" rx="6"/>
+                    <text class="dg-txt dg-b" x="250" y="68">Блок живлення</text>
+                    <text class="dg-sub" x="250" y="86">AC→DC, ізольований</text>
 
-<h2 id="logic">Правило керування розеткою</h2>
-<p>Кожна розетка прив'язується до одного входу (або до жодного, тоді нею керують лише вручну).</p>
-<ul>
-  <li>Вхід активний, розетка <strong>ON</strong>. Вхід неактивний, розетка <strong>OFF</strong>.</li>
-  <li>Прапорець <strong>«Інверсія»</strong> на розетці міняє це правило для неї одної: активний вхід вимикає, а неактивний вмикає.</li>
-  <li><strong>«Затримка увімкнення»</strong> (0–600 с) утримує розетку вимкненою певний час після того, як вхід став «дозволяючим». Вимикається розетка завжди миттєво. Затримка рахується вже після інверсії, а якщо вхід зник раніше за кінець відліку, вмикання скасовується. Корисно, якщо мережа «мерехтить».</li>
-</ul>
+                    <rect class="dg-box dg-hv" x="240" y="144" width="150" height="56" rx="6"/>
+                    <text class="dg-txt dg-b" x="250" y="168">Датчик ZMPT101B</text>
+                    <text class="dg-sub" x="250" y="186">гальванічна розв'язка</text>
 
-<table>
-  <tr><th>Вхід</th><th>Інверсія вимкнена</th><th>Інверсія ввімкнена</th></tr>
-  <tr><td>активний</td><td>ON (з урахуванням затримки)</td><td>OFF</td></tr>
-  <tr><td>неактивний</td><td>OFF (миттєво)</td><td>ON (з урахуванням затримки)</td></tr>
-</table>
+                    <rect class="dg-box" x="240" y="235" width="150" height="56" rx="6"/>
+                    <text class="dg-txt dg-b" x="250" y="259">Оптрон</text>
+                    <text class="dg-sub" x="250" y="277">розв'язка входу DC1</text>
 
-<div class="callout note">
-  <span class="t">Розетка під керуванням входу не перемикається вручну</span>
-  Якщо розетка прив'язана до входу, кнопка живлення на її картці неактивна, і хаб відхиляє ручну команду навіть через API. Інакше вхід і рука боролись би за те саме реле, і виграв би той, хто спрацював останнім. Щоб керувати вручну, виберіть у розетки вхід «— (тільки вручну)».
-</div>
+                    <rect class="dg-box" x="240" y="315" width="150" height="56" rx="6"/>
+                    <text class="dg-txt dg-b" x="250" y="339">Оптрон</text>
+                    <text class="dg-sub" x="250" y="357">розв'язка входу DC2</text>
 
-<h2 id="boot">Що відбувається при вмиканні живлення</h2>
-<ol>
-  <li>Світлодіод починає блимати раз на секунду. Це означає, що прошивка жива.</li>
-  <li>Хаб піднімає власну точку доступу <code>SmartPlug-XXXXXX</code> і намагається підключитись до збереженої домашньої мережі.</li>
-  <li>Щойно Wi-Fi підключився, хаб опитує справжній стан збережених розеток і застосовує стан входів. Без мережі подати команду на HTTP- чи MQTT-розетку неможливо, тому до підключення стан входів не застосовується.</li>
-</ol>
+                    <!-- до контролера -->
+                    <path class="dg-wire" d="M390 72H438"/>
+                    <path class="dg-wire" d="M390 172H438"/>
+                    <path class="dg-wire" d="M390 263H438"/>
+                    <path class="dg-wire" d="M390 343H438"/>
 
-<div class="callout warn">
-  <span class="t">Чому розетка не одразу реагує після ввімкнення хаба</span>
-  Це нормально: спочатку хаб має підключитись до Wi-Fi, і лише потім розсилає команди. Якщо Wi-Fi недоступний, команди розеткам не надсилаються.
-</div>
+                    <rect class="dg-mcu" x="440" y="44" width="120" height="320" rx="8"/>
+                    <text class="dg-txt dg-b" x="500" y="205" text-anchor="middle">ESP32-S3</text>
+                    <text class="dg-sub" x="500" y="222" text-anchor="middle">WROOM-1 · 16 МБ</text>
+                    <text class="dg-sub" x="448" y="76">+3,3 В</text>
+                    <text class="dg-sub" x="448" y="176">GPIO10</text>
+                    <text class="dg-sub" x="448" y="267">GPIO7</text>
+                    <text class="dg-sub" x="448" y="347">GPIO2</text>
+                    <text class="dg-sub" x="552" y="100" text-anchor="end">GPIO12</text>
+                    <text class="dg-sub" x="552" y="184" text-anchor="end">Wi-Fi AP</text>
+                    <text class="dg-sub" x="552" y="254" text-anchor="end">Wi-Fi STA</text>
 
-</main>
+                    <!-- вихідні зв'язки -->
+                    <path class="dg-wire" d="M560 96H624"/>
+                    <circle class="dg-led" cx="640" cy="96" r="9"/>
+                    <text class="dg-sub" x="640" y="122" text-anchor="middle">світлодіод</text>
+                    <text class="dg-sub" x="640" y="136" text-anchor="middle">1 раз/с</text>
+
+                    <path class="dg-wire dash" d="M560 180H618"/>
+                    <rect class="dg-box" x="620" y="160" width="125" height="40" rx="6"/>
+                    <text class="dg-txt dg-b" x="630" y="178">Телефон / ПК</text>
+                    <text class="dg-sub" x="630" y="193">192.168.4.1</text>
+
+                    <path class="dg-wire" d="M560 250H618"/>
+                    <rect class="dg-box" x="620" y="222" width="125" height="56" rx="6"/>
+                    <text class="dg-txt dg-b" x="630" y="246">Роутер</text>
+                    <text class="dg-sub" x="630" y="264">2,4 ГГц</text>
+
+                    <path class="dg-wire" d="M682 278V318"/>
+                    <rect class="dg-box" x="620" y="320" width="125" height="56" rx="6"/>
+                    <text class="dg-txt dg-b" x="630" y="344">Розетки</text>
+                    <text class="dg-sub" x="630" y="362">Shelly, Tasmota, MQTT</text>
+
+                    <!-- легенда -->
+                    <rect class="dg-box dg-hv" x="10" y="424" width="22" height="14" rx="3"/>
+                    <text class="dg-sub" x="40" y="436">мережева напруга, небезпечно</text>
+                    <rect class="dg-box" x="270" y="424" width="22" height="14" rx="3"/>
+                    <text class="dg-sub" x="300" y="436">низька напруга</text>
+                </svg>
+            </div>
+            <figcaption>Схема підключення (вигляд ззовні). Назви клем на платі можуть відрізнятися.</figcaption>
+        </figure>
+
+        <div class="callout note">
+            <span class="t">Піни не змінюються з веб-інтерфейсу</span>
+            Номери пінів зашиті під час збирання прошивки. У вебі можна лише вмикати й вимикати «прослуховування» входу.
+            Щоб змінити піни, треба перезібрати й перепрошити пристрій через <code>idf.py menuconfig</code> (розділ
+            «Smart Plug Control»).
+        </div>
+
+        <div class="callout warn">
+            <span class="t">AC1 тільки на GPIO1–10</span>
+            АЦП в безперервному режимі на ESP32-S3 працює лише з ADC1, тобто GPIO1–10. Якщо на вашій платі вихід
+            ZMPT101B розведено на GPIO11 (це вже ADC2), з'єднайте GPIO11 перемичкою з GPIO10.
+        </div>
+
+        <h2 id="inputs">Як працюють входи</h2>
+
+        <h3>DC1 і DC2</h3>
+        <p>Дискретний вхід. Напруга спрацювання 5-24 В</p>
+
+        <h3>AC1</h3>
+        <p>Аналоговий вхід</p>
+        <p>Вимірювання, межі спрацювання й калібрування описані на сторінці <a href="ac.html">Напруга мережі (AC1)</a>.</p>
+
+        <h2 id="logic">Правило керування розеткою</h2>
+        <p>Кожна розетка прив'язується до одного входу (або до жодного, тоді нею керують лише вручну).</p>
+        <ul>
+            <li>Вхід активний, розетка <strong>Вмикається</strong>. Вхід неактивний, розетка <strong>Вимикається</strong>.</li>
+            <li>Є можливість <strong>«Інверсії»</strong> входу.
+            </li>
+            <li><strong>«Затримка увімкнення»</strong> (0–600 с) утримує розетку вимкненою певний час після того, як
+                вхід став «дозволяючим».
+            </li>
+        </ul>
+
+        <table>
+            <tr>
+                <th>Вхід</th>
+                <th>Інверсія вимкнена</th>
+                <th>Інверсія ввімкнена</th>
+            </tr>
+            <tr>
+                <td>активний</td>
+                <td>ON (з урахуванням затримки)</td>
+                <td>OFF (миттєво)</td>
+            </tr>
+            <tr>
+                <td>неактивний</td>
+                <td>OFF (миттєво)</td>
+                <td>ON (з урахуванням затримки)</td>
+            </tr>
+        </table>
+
+        <div class="callout note">
+            <span class="t">Розетка під керуванням входу не перемикається вручну</span>
+            Якщо розетка прив'язана до входу, то ручне керування нею заблоковане.
+          Щоб керувати вручну, виберіть у розетки вхід «— (тільки вручну)».
+        </div>
+
+    </main>
 </div>
 <script src="assets/site.js"></script>
 </body>

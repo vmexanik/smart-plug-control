@@ -638,7 +638,7 @@
     esphome: 'ESPHome',
     unknown: null,
   };
-  const KIND_WARNING = { relay: 'не розетка, реле', light: 'не розетка, світло' };
+  const KIND_WARNING = { relay: 'реле', light: 'світло' };
 
   function renderScanRow(r) {
     const tr = document.createElement('tr');
@@ -982,7 +982,7 @@
     try {
       const i = await api('/api/system/ota');
       fwMaxSize = i.max_size || 0;
-      $('#fw-info').textContent = `Поточна прошивка: ${i.project || '?'} ${i.version || ''}, зібрана ${i.built || '?'}`;
+      $('#fw-info').textContent = `Поточна прошивка: ${i.project || '?'} ${i.version || ''} (hardware ver. ${i.hw_version || '?'}), зібрана ${i.built || '?'}.`;
     } catch (e) {
       $('#fw-info').textContent = 'Не вдалося отримати інформацію про прошивку: ' + e.message;
     }
@@ -1177,7 +1177,7 @@
       const d = new Date(t.epoch * 1000);
       const sourceTxt = { ntp: 'NTP', manual: 'вручну', none: 'не синхронізовано' }[t.source] || t.source;
       const ntpNote = t.last_ntp_sync
-        ? `; остання NTP-синхронізація: ${new Date(t.last_ntp_sync * 1000).toLocaleString()}, далі раз на ${t.sync_interval_h} год`
+        ? `; остання NTP-синхронізація: ${new Date(t.last_ntp_sync * 1000).toLocaleString()}`
         : '';
       el.innerHTML = t.synced
         ? `<span class="good">Час пристрою: ${d.toLocaleString()} (${sourceTxt}${ntpNote})</span>`

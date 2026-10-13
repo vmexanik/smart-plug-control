@@ -1,5 +1,16 @@
 menu "Smart Plug Control"
 
+    config HW_VERSION
+        string "Hardware revision this firmware is built for"
+        default "1.1"
+        help
+            Stamped into the firmware image (see hw_version.c). The web OTA
+            update refuses any image that was built for a different
+            revision, or that carries no revision stamp at all, so a
+            firmware for another board cannot be flashed over the air.
+            Change it only together with the board revision the build
+            really targets. Max 15 characters.
+
     menu "Default trigger input GPIOs"
         comment "Runtime web UI can change enable/disable and invert; these are the physical pin defaults on first boot."
         comment "Defaults below target ESP32-S3-WROOM-1-N16R8 (Octal PSRAM). If building for a classic ESP32-WROOM-32 instead, GPIO34/35/32 (input-only, no pull resistor) are the traditional choice there and remain valid -- just change these back."

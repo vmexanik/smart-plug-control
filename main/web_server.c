@@ -18,6 +18,7 @@
 #include "wifi_manager.h"
 #include "storage.h"
 #include "time_sync.h"
+#include "hw_version.h"
 #include "net_scan.h"
 #include "fingerprint.h"
 #include "ac_monitor.h"
@@ -644,7 +645,7 @@ static esp_err_t h_ac_calibrate(httpd_req_t *req)
         }
         esp_err_t err = ac_monitor_calibrate(vref, &k);
         if (err == ESP_FAIL) {
-            return send_error(req, 409, "немає сигналу від ZMPT101B — перевірте підключення і наявність мережі");
+            return send_error(req, 409, "немає сигналу від AC1 — перевірте підключення і наявність мережі");
         }
         if (err != ESP_OK) {
             return send_error(req, 500, "калібрування не вдалося");
@@ -697,6 +698,7 @@ static esp_err_t h_ota_info(httpd_req_t *req)
         snprintf(tmp, sizeof(tmp), "%.15s %.15s", d.date, d.time);
         cJSON_AddStringToObject(o, "built", tmp);
     }
+    cJSON_AddStringToObject(o, "hw_version", hw_version_str());
     if (run) cJSON_AddStringToObject(o, "partition", run->label);
     cJSON_AddNumberToObject(o, "max_size", next ? (double)next->size : 0.0);
     return send_json(req, o, 200);
@@ -769,6 +771,19 @@ static esp_err_t h_ota_post(httpd_req_t *req)
         goto fail;
     }
 
+    /* Hardware revision lock: the image must be stamped with exactly the
+     * revision this device was built for (see hw_version.h). Images without
+     * a stamp (older builds) are rejected too -- "unknown" is not "compatible". */
+    char img_hw[HW_REV_VER_MAX];
+    if (!hw_rev_from_image(buf, (size_t)r, img_hw, sizeof(img_hw))) {
+        snprintf(msg, sizeof(msg), "у прошивці немає позначки версії заліза; потрібна збірка для HW %s", hw_version_str());
+        goto fail;
+    }
+    if (strcmp(img_hw, hw_version_str()) != 0) {
+        snprintf(msg, sizeof(msg), "прошивка для іншої версії заліза: HW %.15s (цей пристрій: HW %s)", img_hw, hw_version_str());
+        goto fail;
+    }
+
     esp_err_t err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &handle);
     if (err != ESP_OK) {
         code = 500;
@@ -776,8 +791,8 @@ static esp_err_t h_ota_post(httpd_req_t *req)
         goto fail;
     }
     begun = true;
-    ESP_LOGI(TAG, "OTA: %u bytes -> %s (project %.31s, version %.31s)",
-             (unsigned)total, part->label, nd.project_name, nd.version);
+    ESP_LOGI(TAG, "OTA: %u bytes -> %s (project %.31s, version %.31s, HW %s)",
+             (unsigned)total, part->label, nd.project_name, nd.version, img_hw);
 
     err = esp_ota_write(handle, buf, (size_t)r);
     if (err != ESP_OK) {
@@ -827,7 +842,7 @@ static esp_err_t h_ota_post(httpd_req_t *req)
 
     free(buf);
     char detail[128];
-    snprintf(detail, sizeof(detail), "%u bytes -> %s, version %.31s", (unsigned)total, part->label, nd.version);
+    snprintf(detail, sizeof(detail), "%u bytes -> %s, version %.31s, HW %s", (unsigned)total, part->label, nd.version, img_hw);
     ESP_LOGI(TAG, "OTA done: %s, rebooting", detail);
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddBoolToObject(resp, "ok", true);

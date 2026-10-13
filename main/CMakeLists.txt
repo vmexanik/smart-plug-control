@@ -12,6 +12,7 @@ idf_component_register(
         "web_server.c"
         "cJSON.c"
         "time_sync.c"
+        "hw_version.c"
         "net_scan.c"
         "fingerprint.c"
         "system_health.c"

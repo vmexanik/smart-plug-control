@@ -220,6 +220,20 @@ tr:last-child td { border-bottom: 0; }
 .badges { display: flex; flex-wrap: wrap; gap: .4rem; margin: 1rem 0 0; }
 
 figure { margin: 1.4rem 0; }
+/* схема підключення (hardware.html) */
+.dg-board { fill: none; stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 6 4; }
+.dg-box { fill: var(--surface-2); stroke: var(--border); stroke-width: 1.5; }
+.dg-hv { stroke: var(--bad); }
+.dg-mcu { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+.dg-led { fill: var(--good-soft); stroke: var(--good); stroke-width: 1.5; }
+.dg-wire { stroke: var(--muted); stroke-width: 1.8; fill: none; marker-end: url(#dg-arrow); }
+.dg-wire.hv { stroke: var(--bad); }
+.dg-wire.dash { stroke-dasharray: 5 4; }
+.dg-txt { fill: var(--text); font: 13px var(--sans); }
+.dg-sub { fill: var(--muted); font: 11.5px var(--sans); }
+.dg-b { font-weight: 650; }
+
+figure .tscroll svg { min-width: 640px; }
 figure svg { width: 100%; display: block; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
 figcaption { color: var(--muted); font-size: .88rem; margin-top: .5rem; }
 
